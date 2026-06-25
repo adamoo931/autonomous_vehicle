@@ -1,0 +1,111 @@
+#include "motor_driver.h"
+#include "config.h"
+#include "driver/ledc.h"
+#include "driver/gpio.h"
+#include "esp_log.h"
+#include <stdlib.h>  // abs()
+
+static const char *TAG = "MOTOR";
+static int s_left  = 0;
+static int s_right = 0;
+
+static inline int clamp(int v, int lo, int hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+}
+
+static void set_duty(ledc_channel_t ch, int pct) {
+    uint32_t duty = (uint32_t)((abs(pct) * 1023UL) / 100UL);
+    ledc_set_duty(LEDC_MODE, ch, duty);
+    ledc_update_duty(LEDC_MODE, ch);
+}
+
+void motor_init(void) {
+    // ── Piny kierunkowe ──
+    gpio_config_t dir = {
+        .pin_bit_mask = (1ULL << PIN_AIN1) | (1ULL << PIN_AIN2) |
+                        (1ULL << PIN_BIN1) | (1ULL << PIN_BIN2),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&dir);
+
+    // ── Timer LEDC ──
+    ledc_timer_config_t tmr = {
+        .speed_mode      = LEDC_MODE,
+        .timer_num       = LEDC_TIMER,
+        .duty_resolution = LEDC_RESOLUTION,
+        .freq_hz         = LEDC_FREQ_HZ,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    ledc_timer_config(&tmr);
+
+    // ── Kanał lewy (A) ──
+    ledc_channel_config_t chA = {
+        .channel    = LEDC_CHANNEL_LEFT,
+        .duty       = 0,
+        .gpio_num   = PIN_PWMA,
+        .speed_mode = LEDC_MODE,
+        .hpoint     = 0,
+        .timer_sel  = LEDC_TIMER,
+    };
+    ledc_channel_config(&chA);
+
+    // ── Kanał prawy (B) ──
+    ledc_channel_config_t chB = {
+        .channel    = LEDC_CHANNEL_RIGHT,
+        .duty       = 0,
+        .gpio_num   = PIN_PWMB,
+        .speed_mode = LEDC_MODE,
+        .hpoint     = 0,
+        .timer_sel  = LEDC_TIMER,
+    };
+    ledc_channel_config(&chB);
+
+    motor_stop();
+    ESP_LOGI(TAG, "Motor driver initialized");
+}
+
+void motor_set_left(int speed) {
+    speed   = clamp(speed, -100, 100);
+    s_left  = speed;
+
+    if (speed > 0) {
+        gpio_set_level(PIN_AIN1, 1);
+        gpio_set_level(PIN_AIN2, 0);
+    } else if (speed < 0) {
+        gpio_set_level(PIN_AIN1, 0);
+        gpio_set_level(PIN_AIN2, 1);
+    } else {
+        gpio_set_level(PIN_AIN1, 0);
+        gpio_set_level(PIN_AIN2, 0);
+    }
+    set_duty(LEDC_CHANNEL_LEFT, speed);
+}
+
+void motor_set_right(int speed) {
+    speed   = clamp(speed, -100, 100);
+    s_right = speed;
+
+    if (speed > 0) {
+        gpio_set_level(PIN_BIN1, 1);
+        gpio_set_level(PIN_BIN2, 0);
+    } else if (speed < 0) {
+        gpio_set_level(PIN_BIN1, 0);
+        gpio_set_level(PIN_BIN2, 1);
+    } else {
+        gpio_set_level(PIN_BIN1, 0);
+        gpio_set_level(PIN_BIN2, 0);
+    }
+    set_duty(LEDC_CHANNEL_RIGHT, speed);
+}
+
+void motor_forward(uint8_t speed)  { motor_set_left( speed); motor_set_right( speed); }
+void motor_backward(uint8_t speed) { motor_set_left(-speed); motor_set_right(-speed); }
+void motor_turn_left(uint8_t speed)  { motor_set_left(-(speed/2)); motor_set_right( speed); }
+void motor_turn_right(uint8_t speed) { motor_set_left( speed);     motor_set_right(-(speed/2)); }
+void motor_stop(void) { motor_set_left(0); motor_set_right(0); }
+
+int motor_get_left_speed(void)  { return s_left;  }
+int motor_get_right_speed(void) { return s_right; }

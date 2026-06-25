@@ -1,0 +1,2 @@
+source C:/Projects/autonomous_vehicle/build/bootloader/gdbinit/symbols
+source C:/Projects/autonomous_vehicle/build/bootloader/gdbinit/connect
