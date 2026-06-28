@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <string.h>
 
 #if LIDAR_ENABLED
@@ -21,6 +22,19 @@ static TaskHandle_t   s_task  = NULL;
 static volatile uint32_t s_rx_bytes    = 0;
 static volatile uint32_t s_ok_packets  = 0;
 static volatile uint32_t s_crc_errors  = 0;
+
+// ── Bufor kołowy pełnego skanu ───────────────────────────────
+static lidar_scan_point_t s_buf[LIDAR_SCAN_BUFFER];
+static uint32_t           s_seq     = 0;     // łączna liczba dodanych punktów
+static SemaphoreHandle_t  s_buf_mtx = NULL;  // ochrona bufora producent/konsument
+
+// Dodaje punkt do bufora kołowego (wołane tylko z lidar_task,
+// pod muteksem). Punkt otrzymuje numer sekwencyjny s_seq+1.
+static inline void buf_push(uint16_t angle, uint16_t dist) {
+    s_buf[s_seq % LIDAR_SCAN_BUFFER].angle_hundredths = angle;
+    s_buf[s_seq % LIDAR_SCAN_BUFFER].distance_mm      = dist;
+    s_seq++;
+}
 
 static uint8_t crc8(const uint8_t *data, uint8_t len) {
     uint8_t crc = 0;
@@ -75,7 +89,8 @@ static void lidar_task(void *arg) {
             packet_idx = 0;
 
             uint8_t expected_crc = crc8(data, LD06_PACKET_LEN - 1);
-            if (expected_crc != data[LD06_PACKET_LEN - 1]) {
+            bool crc_ok = (expected_crc == data[LD06_PACKET_LEN - 1]);
+            if (!crc_ok) {
                 s_crc_errors++;
             }
 
@@ -97,11 +112,23 @@ static void lidar_task(void *arg) {
             pkt.valid = true;
             s_last = pkt;
             s_ok_packets++;
+
+            // Do mapy trafiają tylko pakiety z poprawnym CRC – brak śmieci.
+            if (crc_ok && s_buf_mtx) {
+                xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
+                for (int i = 0; i < 12; i++)
+                    buf_push(pkt.points[i].angle_hundredths,
+                             pkt.points[i].distance_mm);
+                xSemaphoreGive(s_buf_mtx);
+            }
         }
     }
 }
 
 void lidar_init(void) {
+    // Mutex bufora skanu (producent = lidar_task, konsument = HTTP).
+    if (!s_buf_mtx) s_buf_mtx = xSemaphoreCreateMutex();
+
     // ── KLUCZOWE: odepnij GPIO1/3 od UART0 (IO MUX) ──
     // W tym firmware UART0 jest aktywny (konsola ESP_LOG).
     // UART0 trzyma GPIO1/3 przez IO MUX (polaczenie sprzetowe).
@@ -148,11 +175,46 @@ uint16_t lidar_get_min_distance_mm(void) {
     return (mn == 0xFFFF) ? 0 : mn;
 }
 
+uint16_t lidar_get_speed_rpm(void) { return s_last.speed_rpm; }
+
+uint16_t lidar_copy_scan(uint32_t since, lidar_scan_point_t *out,
+                         uint16_t max_pts, uint32_t *out_seq) {
+    if (!out || max_pts == 0 || !s_buf_mtx) {
+        if (out_seq) *out_seq = s_seq;
+        return 0;
+    }
+    uint16_t n = 0;
+    xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
+    uint32_t cur = s_seq;
+
+    // Najstarszy punkt nadal obecny w buforze kołowym.
+    uint32_t first_avail = (cur > LIDAR_SCAN_BUFFER)
+                         ? (cur - LIDAR_SCAN_BUFFER + 1) : 1;
+    uint32_t start = since + 1;
+    if (start < first_avail) start = first_avail;          // klient się spóźnił
+    if (cur >= start && (cur - start + 1) > max_pts)       // ogranicz do najnowszych
+        start = cur - max_pts + 1;
+
+    for (uint32_t s = start; s <= cur && n < max_pts; s++)
+        out[n++] = s_buf[(s - 1) % LIDAR_SCAN_BUFFER];
+
+    if (out_seq) *out_seq = cur;
+    xSemaphoreGive(s_buf_mtx);
+    return n;
+}
+
 #else
 
 void lidar_init(void) { }
 void lidar_stop(void) { }
 lidar_packet_t lidar_get_last_packet(void) { lidar_packet_t p = {0}; return p; }
 uint16_t lidar_get_min_distance_mm(void)   { return 0; }
+uint16_t lidar_get_speed_rpm(void)         { return 0; }
+uint16_t lidar_copy_scan(uint32_t since, lidar_scan_point_t *out,
+                         uint16_t max_pts, uint32_t *out_seq) {
+    (void)since; (void)out; (void)max_pts;
+    if (out_seq) *out_seq = 0;
+    return 0;
+}
 
 #endif

@@ -15,6 +15,7 @@
 #include "cJSON.h"
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 static const char *TAG = "HTTP";
 static httpd_handle_t s_server = NULL;
@@ -492,6 +493,49 @@ static esp_err_t handle_buzzer(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ── GET /api/lidar/scan?since=N ──────────────────────────────
+// Strumień punktów lidaru do budowy mapy przeszkód.
+// Zwraca kompaktowy JSON: {"seq":S,"rpm":R,"n":K,"pts":[a0,d0,a1,d1,...]}
+//   seq – bieżący licznik sekwencyjny (podaj jako ?since= przy kolejnym żądaniu,
+//         dzięki czemu pobierasz tylko NOWE punkty, bez duplikatów)
+//   pts – spłaszczona tablica par (kąt[setne stopnia], odległość[mm])
+static esp_err_t handle_lidar_scan(httpd_req_t *req) {
+    uint32_t since = 0;
+    char q[48];
+    if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK) {
+        char v[24];
+        if (httpd_query_key_value(q, "since", v, sizeof(v)) == ESP_OK)
+            since = (uint32_t)strtoul(v, NULL, 10);
+    }
+
+    // Okno odczytu: najnowsze do 512 punktów na żądanie (~jeden obrót LD06).
+    static lidar_scan_point_t pts[512];
+    uint32_t seq = 0;
+    uint16_t n = lidar_copy_scan(since, pts, 512, &seq);
+
+    // Ręczny, kompaktowy JSON (cJSON dla setek liczb jest pamięcio/czasożerny).
+    size_t cap = 64 + (size_t)n * 14;   // "65535,65535," ≈ 12 znaków/punkt
+    char *buf = malloc(cap);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_FAIL;
+    }
+
+    int len = snprintf(buf, cap, "{\"seq\":%lu,\"rpm\":%u,\"n\":%u,\"pts\":[",
+                       (unsigned long)seq, lidar_get_speed_rpm(), n);
+    for (uint16_t i = 0; i < n && len < (int)cap; i++) {
+        len += snprintf(buf + len, cap - len, "%s%u,%u",
+                        i ? "," : "", pts[i].angle_hundredths, pts[i].distance_mm);
+    }
+    if (len < (int)cap) len += snprintf(buf + len, cap - len, "]}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, len);
+    free(buf);
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
@@ -506,6 +550,7 @@ esp_err_t http_server_start(void) {
     httpd_uri_t routes[] = {
         { .uri="/",                   .method=HTTP_GET,  .handler=handle_root       },
         { .uri="/api/sensors",        .method=HTTP_GET,  .handler=handle_sensors    },
+        { .uri="/api/lidar/scan",     .method=HTTP_GET,  .handler=handle_lidar_scan },
         { .uri="/api/motor",          .method=HTTP_POST, .handler=handle_motor      },
         { .uri="/api/motor/stop",     .method=HTTP_POST, .handler=handle_motor_stop },
         { .uri="/api/led",            .method=HTTP_POST, .handler=handle_led        },

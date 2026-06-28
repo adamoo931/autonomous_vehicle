@@ -1,0 +1,4 @@
+matplotlib>=3.5
+numpy>=1.21
+# tkinter jest częścią standardowej biblioteki Pythona
+# (na Linuksie może wymagać pakietu systemowego: sudo apt install python3-tk)
