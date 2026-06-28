@@ -1,7 +1,7 @@
 {
     "version":            "1.3",
     "project_name":       "autonomous_vehicle",
-    "project_version":    "d49890a-dirty",
+    "project_version":    "1633fff-dirty",
     "project_path":       "C:/Projects/autonomous_vehicle",
     "idf_path":           "C:/esp/v6.0.1/esp-idf",
     "build_dir":          "C:/Projects/autonomous_vehicle/build",

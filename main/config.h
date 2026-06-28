@@ -101,7 +101,7 @@
 //     z wlasnym projektem KiCad – tam net bazy R41 jest czytelny.
 //     GPIO33 to bezpieczny domyslny pin (wolny, nie strapping).
 // ============================================================
-#define PIN_BUZZER         33
+#define PIN_BUZZER         25
 #define BUZZER_LEDC_TIMER    LEDC_TIMER_1     // inny niz silniki (TIMER_0)
 #define BUZZER_LEDC_CHANNEL  LEDC_CHANNEL_2   // inny niz silniki (0,1)
 
