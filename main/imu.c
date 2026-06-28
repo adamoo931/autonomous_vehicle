@@ -2,6 +2,8 @@
 #include "config.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "IMU";
 
@@ -17,11 +19,12 @@ static const char *TAG = "IMU";
 #define ICM_WHO_AM_I_EXPECTED 0xEA
 
 static imu_data_t s_last = {0};
+static uint8_t    s_addr = ICM20948_ADDR;   // ustalany w imu_init (0x68/0x69)
 
 static esp_err_t icm_write(uint8_t reg, uint8_t val) {
     i2c_cmd_handle_t h = i2c_cmd_link_create();
     i2c_master_start(h);
-    i2c_master_write_byte(h, (ICM20948_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(h, (s_addr << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(h, reg, true);
     i2c_master_write_byte(h, val, true);
     i2c_master_stop(h);
@@ -33,10 +36,10 @@ static esp_err_t icm_write(uint8_t reg, uint8_t val) {
 static esp_err_t icm_read(uint8_t reg, uint8_t *buf, size_t len) {
     i2c_cmd_handle_t h = i2c_cmd_link_create();
     i2c_master_start(h);
-    i2c_master_write_byte(h, (ICM20948_ADDR << 1) | I2C_MASTER_WRITE, true);
+    i2c_master_write_byte(h, (s_addr << 1) | I2C_MASTER_WRITE, true);
     i2c_master_write_byte(h, reg, true);
     i2c_master_start(h);
-    i2c_master_write_byte(h, (ICM20948_ADDR << 1) | I2C_MASTER_READ, true);
+    i2c_master_write_byte(h, (s_addr << 1) | I2C_MASTER_READ, true);
     if (len > 1) i2c_master_read(h, buf, len - 1, I2C_MASTER_ACK);
     i2c_master_read_byte(h, buf + len - 1, I2C_MASTER_NACK);
     i2c_master_stop(h);
@@ -53,30 +56,41 @@ static int16_t to_int16(uint8_t h, uint8_t l) {
     return (int16_t)((uint16_t)h << 8 | l);
 }
 
-esp_err_t imu_init(void) {
+// Probuje odczytac WHO_AM_I pod podanym adresem.
+static bool icm_check_addr(uint8_t addr) {
+    s_addr = addr;
     select_bank(0);
     uint8_t who = 0;
-    esp_err_t ret = icm_read(REG_WHO_AM_I, &who, 1);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "ICM-20948 brak odpowiedzi (err=%d)", ret);
-        s_last.initialized = false;
-        return ret;
+    if (icm_read(REG_WHO_AM_I, &who, 1) != ESP_OK) return false;
+    return (who == ICM_WHO_AM_I_EXPECTED);
+}
+
+esp_err_t imu_init(void) {
+    s_last.initialized = false;
+
+    // Auto-wykrywanie adresu: 0x68 (AD0=GND) lub 0x69 (AD0=VCC)
+    uint8_t found = 0;
+    const uint8_t candidates[] = { ICM20948_ADDR, 0x68, 0x69 };
+    for (size_t i = 0; i < sizeof(candidates); i++) {
+        if (icm_check_addr(candidates[i])) { found = candidates[i]; break; }
     }
-    if (who != ICM_WHO_AM_I_EXPECTED) {
-        ESP_LOGE(TAG, "WHO_AM_I=0x%02X (oczekiwano 0xEA)", who);
-        s_last.initialized = false;
+    if (!found) {
+        ESP_LOGE(TAG, "ICM-20948 nie znaleziony (WHO_AM_I != 0xEA pod 0x68/0x69)");
         return ESP_ERR_NOT_FOUND;
     }
+    s_addr = found;
 
-    // Wybudź układ, wybierz auto-zegar
-    icm_write(REG_PWR_MGMT1, 0x01);
+    // Miekki reset, potem wybudzenie
+    icm_write(REG_PWR_MGMT1, 0x80);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    select_bank(0);
+    icm_write(REG_PWR_MGMT1, 0x01);   // auto-zegar
     vTaskDelay(pdMS_TO_TICKS(10));
-    // Włącz accel + gyro
-    icm_write(REG_PWR_MGMT2, 0x00);
+    icm_write(REG_PWR_MGMT2, 0x00);   // accel + gyro ON
     vTaskDelay(pdMS_TO_TICKS(10));
 
     s_last.initialized = true;
-    ESP_LOGI(TAG, "ICM-20948 OK (WHO_AM_I=0x%02X)", who);
+    ESP_LOGI(TAG, "ICM-20948 OK pod adresem 0x%02X (WHO_AM_I=0xEA)", s_addr);
     return ESP_OK;
 }
 

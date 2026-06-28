@@ -1,7 +1,7 @@
 {
     "version":            "1.3",
     "project_name":       "autonomous_vehicle",
-    "project_version":    "1",
+    "project_version":    "b68f185-dirty",
     "project_path":       "C:/Projects/autonomous_vehicle",
     "idf_path":           "C:/esp/v6.0.1/esp-idf",
     "build_dir":          "C:/Projects/autonomous_vehicle/build",
@@ -1780,7 +1780,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [ "espressif__cjson" ],
             "file": "C:/Projects/autonomous_vehicle/build/esp-idf/main/libmain.a",
-            "sources": [ "C:/Projects/autonomous_vehicle/main/main.c", "C:/Projects/autonomous_vehicle/main/motor_driver.c", "C:/Projects/autonomous_vehicle/main/lidar.c", "C:/Projects/autonomous_vehicle/main/line_sensor.c", "C:/Projects/autonomous_vehicle/main/odometry.c", "C:/Projects/autonomous_vehicle/main/imu.c", "C:/Projects/autonomous_vehicle/main/pyrometer.c", "C:/Projects/autonomous_vehicle/main/led_control.c", "C:/Projects/autonomous_vehicle/main/wifi_manager.c", "C:/Projects/autonomous_vehicle/main/http_server.c" ],
+            "sources": [ "C:/Projects/autonomous_vehicle/main/main.c", "C:/Projects/autonomous_vehicle/main/motor_driver.c", "C:/Projects/autonomous_vehicle/main/lidar.c", "C:/Projects/autonomous_vehicle/main/line_sensor.c", "C:/Projects/autonomous_vehicle/main/odometry.c", "C:/Projects/autonomous_vehicle/main/imu.c", "C:/Projects/autonomous_vehicle/main/pyrometer.c", "C:/Projects/autonomous_vehicle/main/led_control.c", "C:/Projects/autonomous_vehicle/main/wifi_manager.c", "C:/Projects/autonomous_vehicle/main/http_server.c", "C:/Projects/autonomous_vehicle/main/ina219.c", "C:/Projects/autonomous_vehicle/main/sht40.c", "C:/Projects/autonomous_vehicle/main/buzzer.c", "C:/Projects/autonomous_vehicle/main/web_monitor.c" ],
             "include_dirs": [ "." ]
         },
         "mbedtls": {

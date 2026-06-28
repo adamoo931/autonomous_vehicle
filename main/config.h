@@ -34,7 +34,10 @@
 #define PIN_I2C_SDA     21
 #define PIN_I2C_SCL     22
 #define I2C_PORT        I2C_NUM_0
-#define I2C_FREQ_HZ     400000
+// WAZNE: MLX90614 to SMBus i pracuje MAX 100 kHz. Przy 400 kHz pirometr
+// nie odpowiada i potrafi zablokowac CALA magistrale (wtedy IMU/INA/SHT
+// tez "nie dzialaja"). 100 kHz jest bezpieczne dla wszystkich czujnikow.
+#define I2C_FREQ_HZ     100000
 
 // ============================================================
 //  LIDAR – UART
@@ -42,7 +45,11 @@
 //  Podłączenie LIDARa fizycznie wyłącza monitor szeregowy.
 //  Ustaw LIDAR_ENABLED 0 podczas debugowania przez USB-Serial.
 // ============================================================
-#define LIDAR_ENABLED    0      // 0 = wyłącz LIDAR (debug przez USB)
+// UWAGA: LIDAR na GPIO1/3 = te same piny co USB-Serial (UART0).
+// Po wlaczeniu LIDARa monitor szeregowy USB przestaje dzialac –
+// dlatego logi sa przekierowane na monitor webowy (zakladka w panelu,
+// endpoint /api/logs). To jest celowe.
+#define LIDAR_ENABLED    0      // 1 = LIDAR wlaczony (logi przez WWW)
 #define PIN_LIDAR_TX     1      // ESP TX  →  LIDAR RX
 #define PIN_LIDAR_RX     3      // LIDAR TX  →  ESP RX
 #define LIDAR_UART_PORT  UART_NUM_1
@@ -74,7 +81,21 @@
 //  I2C adresy
 // ============================================================
 #define MLX90614_ADDR  0x5A     // pirometr (domyślny)
-#define ICM20948_ADDR  0x68     // IMU (AD0=GND→0x68, AD0=VCC→0x69)
+#define ICM20948_ADDR  0x69     // IMU (AD0=GND→0x68, AD0=VCC→0x69; auto-probe)
+
+// INA219 – wg schematu A0/A1 podciagniete do VBAT (R21/R22 4.7k) => 0x45.
+// SHT40 zajmuje 0x44, wiec INA NIE moze tam byc. Driver i tak sam wykryje
+// adres (lista kandydatow w ina219.c) i wypisze go na monitorze webowym.
+#define INA219_ADDR        0x68
+#define INA219_SHUNT_OHMS  0.05f   // R13 = 50 mOhm (ZWERYFIKUJ z BOM!)
+
+// SHT40 – adres staly 0x44.
+#define SHT40_ADDR         0x44
+
+//buzzer
+#define PIN_BUZZER         25
+#define BUZZER_LEDC_TIMER    LEDC_TIMER_1     // inny niz silniki (TIMER_0)
+#define BUZZER_LEDC_CHANNEL  LEDC_CHANNEL_2   // inny niz silniki (0,1)
 
 // ============================================================
 //  LEDC (PWM silników)

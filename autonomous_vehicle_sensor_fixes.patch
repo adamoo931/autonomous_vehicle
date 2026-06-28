@@ -1,0 +1,1136 @@
+diff --git a/main/CMakeLists.txt b/main/CMakeLists.txt
+index ee4615f..d4d3725 100644
+--- a/main/CMakeLists.txt
++++ b/main/CMakeLists.txt
+@@ -9,6 +9,10 @@ idf_component_register(SRCS
+     "led_control.c"
+     "wifi_manager.c"
+     "http_server.c"
++    "ina219.c"
++    "sht40.c"
++    "buzzer.c"
++    "web_monitor.c"
+     INCLUDE_DIRS "."
+     REQUIRES
+         esp_wifi
+diff --git a/main/buzzer.c b/main/buzzer.c
+new file mode 100644
+index 0000000..8767fab
+--- /dev/null
++++ b/main/buzzer.c
+@@ -0,0 +1,88 @@
++#include "buzzer.h"
++#include "config.h"
++#include "driver/ledc.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++#include <stdlib.h>
++
++static const char *TAG = "BUZZER";
++
++#define BUZZER_DUTY_RES   LEDC_TIMER_10_BIT
++#define BUZZER_DUTY_50    512   // 50% przy 10-bit
++
++static bool s_ready = false;
++
++void buzzer_init(void) {
++    ledc_timer_config_t tmr = {
++        .speed_mode      = LEDC_MODE,
++        .timer_num       = BUZZER_LEDC_TIMER,
++        .duty_resolution = BUZZER_DUTY_RES,
++        .freq_hz         = 2000,           // wartosc startowa
++        .clk_cfg         = LEDC_AUTO_CLK,
++    };
++    ledc_timer_config(&tmr);
++
++    ledc_channel_config_t ch = {
++        .channel    = BUZZER_LEDC_CHANNEL,
++        .duty       = 0,                   // start: cisza
++        .gpio_num   = PIN_BUZZER,
++        .speed_mode = LEDC_MODE,
++        .hpoint     = 0,
++        .timer_sel  = BUZZER_LEDC_TIMER,
++    };
++    ledc_channel_config(&ch);
++
++    ledc_set_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL, 0);
++    ledc_update_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL);
++
++    s_ready = true;
++    ESP_LOGI(TAG, "Buzzer initialized (GPIO%d)", PIN_BUZZER);
++}
++
++void buzzer_off(void) {
++    if (!s_ready) return;
++    ledc_set_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL, 0);
++    ledc_update_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL);
++}
++
++typedef struct {
++    uint32_t freq;
++    uint32_t dur_ms;
++} tone_arg_t;
++
++// Zadanie jednorazowe: gra ton i sam sie usuwa (nie blokuje HTTP).
++static void tone_task(void *arg) {
++    tone_arg_t a = *(tone_arg_t *)arg;
++    free(arg);
++
++    if (a.freq < 50)    a.freq = 50;
++    if (a.freq > 10000) a.freq = 10000;
++    if (a.dur_ms > 3000) a.dur_ms = 3000;   // limit bezpieczenstwa
++
++    ledc_set_freq(LEDC_MODE, BUZZER_LEDC_TIMER, a.freq);
++    ledc_set_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL, BUZZER_DUTY_50);
++    ledc_update_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL);
++
++    vTaskDelay(pdMS_TO_TICKS(a.dur_ms));
++
++    ledc_set_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL, 0);
++    ledc_update_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL);
++
++    vTaskDelete(NULL);
++}
++
++void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms) {
++    if (!s_ready) return;
++    tone_arg_t *a = malloc(sizeof(tone_arg_t));
++    if (!a) return;
++    a->freq   = freq_hz;
++    a->dur_ms = duration_ms;
++    if (xTaskCreate(tone_task, "buzz", 2048, a, 4, NULL) != pdPASS) {
++        free(a);
++    }
++}
++
++void buzzer_beep(void) {
++    buzzer_tone(2000, 200);
++}
+diff --git a/main/buzzer.h b/main/buzzer.h
+new file mode 100644
+index 0000000..6b2ed50
+--- /dev/null
++++ b/main/buzzer.h
+@@ -0,0 +1,19 @@
++#pragma once
++#include <stdint.h>
++
++// ============================================================
++//  Buzzer pasywny (tranzystor BC847, sterowanie tonem LEDC)
++//  Pin: PIN_BUZZER (config.h) – ZWERYFIKUJ z wlasnym schematem!
++// ============================================================
++
++void buzzer_init(void);
++
++// Zagraj ton o danej czestotliwosci przez dany czas (NIEBLOKUJACE –
++// odtwarzane w tle, funkcja wraca natychmiast). freq w Hz, czas w ms.
++void buzzer_tone(uint32_t freq_hz, uint32_t duration_ms);
++
++// Krotki sygnal testowy (2 kHz, 200 ms).
++void buzzer_beep(void);
++
++// Natychmiastowe wyciszenie.
++void buzzer_off(void);
+diff --git a/main/config.h b/main/config.h
+index b629979..1f33b0f 100644
+--- a/main/config.h
++++ b/main/config.h
+@@ -34,7 +34,10 @@
+ #define PIN_I2C_SDA     21
+ #define PIN_I2C_SCL     22
+ #define I2C_PORT        I2C_NUM_0
+-#define I2C_FREQ_HZ     400000
++// WAZNE: MLX90614 to SMBus i pracuje MAX 100 kHz. Przy 400 kHz pirometr
++// nie odpowiada i potrafi zablokowac CALA magistrale (wtedy IMU/INA/SHT
++// tez "nie dzialaja"). 100 kHz jest bezpieczne dla wszystkich czujnikow.
++#define I2C_FREQ_HZ     100000
+ 
+ // ============================================================
+ //  LIDAR – UART
+@@ -42,7 +45,11 @@
+ //  Podłączenie LIDARa fizycznie wyłącza monitor szeregowy.
+ //  Ustaw LIDAR_ENABLED 0 podczas debugowania przez USB-Serial.
+ // ============================================================
+-#define LIDAR_ENABLED    0      // 0 = wyłącz LIDAR (debug przez USB)
++// UWAGA: LIDAR na GPIO1/3 = te same piny co USB-Serial (UART0).
++// Po wlaczeniu LIDARa monitor szeregowy USB przestaje dzialac –
++// dlatego logi sa przekierowane na monitor webowy (zakladka w panelu,
++// endpoint /api/logs). To jest celowe.
++#define LIDAR_ENABLED    1      // 1 = LIDAR wlaczony (logi przez WWW)
+ #define PIN_LIDAR_TX     1      // ESP TX  →  LIDAR RX
+ #define PIN_LIDAR_RX     3      // LIDAR TX  →  ESP RX
+ #define LIDAR_UART_PORT  UART_NUM_1
+@@ -74,7 +81,27 @@
+ //  I2C adresy
+ // ============================================================
+ #define MLX90614_ADDR  0x5A     // pirometr (domyślny)
+-#define ICM20948_ADDR  0x68     // IMU (AD0=GND→0x68, AD0=VCC→0x69)
++#define ICM20948_ADDR  0x68     // IMU (AD0=GND→0x68, AD0=VCC→0x69; auto-probe)
++
++// INA219 – wg schematu A0/A1 podciagniete do VBAT (R21/R22 4.7k) => 0x45.
++// SHT40 zajmuje 0x44, wiec INA NIE moze tam byc. Driver i tak sam wykryje
++// adres (lista kandydatow w ina219.c) i wypisze go na monitorze webowym.
++#define INA219_ADDR        0x45
++#define INA219_SHUNT_OHMS  0.05f   // R13 = 50 mOhm (ZWERYFIKUJ z BOM!)
++
++// SHT40 – adres staly 0x44.
++#define SHT40_ADDR         0x44
++
++// ============================================================
++//  Buzzer pasywny (tranzystor BC847 -> aktywny stanem WYSOKIM)
++//  !! Numeru GPIO nie dalo sie pewnie odczytac ze schematu (etykieta
++//     "ESP32_GPIOxx" w niskiej rozdzielczosci). USTAW ponizej zgodnie
++//     z wlasnym projektem KiCad – tam net bazy R41 jest czytelny.
++//     GPIO33 to bezpieczny domyslny pin (wolny, nie strapping).
++// ============================================================
++#define PIN_BUZZER         33
++#define BUZZER_LEDC_TIMER    LEDC_TIMER_1     // inny niz silniki (TIMER_0)
++#define BUZZER_LEDC_CHANNEL  LEDC_CHANNEL_2   // inny niz silniki (0,1)
+ 
+ // ============================================================
+ //  LEDC (PWM silników)
+diff --git a/main/http_server.c b/main/http_server.c
+index cc3bf0a..1ff2b2e 100644
+--- a/main/http_server.c
++++ b/main/http_server.c
+@@ -4,12 +4,17 @@
+ #include "odometry.h"
+ #include "pyrometer.h"
+ #include "imu.h"
++#include "ina219.h"
++#include "sht40.h"
++#include "buzzer.h"
+ #include "lidar.h"
+ #include "line_sensor.h"
++#include "web_monitor.h"
+ #include "esp_http_server.h"
+ #include "esp_log.h"
+ #include "cJSON.h"
+ #include <string.h>
++#include <stdlib.h>
+ 
+ static const char *TAG = "HTTP";
+ static httpd_handle_t s_server = NULL;
+@@ -46,6 +51,7 @@ static const char DASHBOARD_HTML[] =
+     ".tag-ok{background:#1b3a2d;color:#3fb950}\n"
+     ".tag-warn{background:#3a2a0d;color:#d29922}\n"
+     "#status-bar{text-align:center;padding:6px;background:#161b22;border-radius:6px;margin-bottom:8px;font-size:0.85em}\n"
++    ".lE{color:#f85149}.lW{color:#d29922}.lI{color:#3fb950}.lD{color:#8b949e}.lo{color:#c9d1d9}\n"
+     "</style>\n"
+     "</head>\n"
+     "<body>\n"
+@@ -72,6 +78,19 @@ static const char DASHBOARD_HTML[] =
+     "    <div>T: <span class=\"val\" id=\"imu-t\">-</span> &#176;C</div>\n"
+     "  </div>\n"
+     "  <div class=\"card\">\n"
++    "    <h2>&#9889; INA219 Zasilanie</h2>\n"
++    "    <div>Napi&#281;cie: <span class=\"val\" id=\"in-v\">-</span> V</div>\n"
++    "    <div>Pr&#261;d: <span class=\"val\" id=\"in-i\">-</span> mA</div>\n"
++    "    <div>Moc: <span class=\"val\" id=\"in-p\">-</span> mW</div>\n"
++    "    <div>Adres I2C: <span class=\"val\" id=\"in-addr\">-</span></div>\n"
++    "  </div>\n"
++    "  <div class=\"card\">\n"
++    "    <h2>&#127777;&#65039; SHT40 Klimat</h2>\n"
++    "    <div>Temp.: <span class=\"val\" id=\"sh-t\">-</span> &#176;C</div>\n"
++    "    <div>Wilgotno&#347;&#263;: <span class=\"val\" id=\"sh-h\">-</span> %</div>\n"
++    "    <div>Adres I2C: <span class=\"val\" id=\"sh-addr\">-</span></div>\n"
++    "  </div>\n"
++    "  <div class=\"card\">\n"
+     "    <h2>&#128207; Odometria</h2>\n"
+     "    <div>Lewe: <span class=\"val\" id=\"od-l\">-</span> mm</div>\n"
+     "    <div>Prawe: <span class=\"val\" id=\"od-r\">-</span> mm</div>\n"
+@@ -123,6 +142,23 @@ static const char DASHBOARD_HTML[] =
+     "      <button onclick=\"allOff()\">Wy&#322;.</button>\n"
+     "    </div>\n"
+     "  </div>\n"
++    "  <div class=\"card\">\n"
++    "    <h2>&#128266; Buzzer</h2>\n"
++    "    <button onclick=\"beep()\">&#9658; Test (2 kHz)</button>\n"
++    "    <button onclick=\"buzz(1000,300)\">Niski ton</button>\n"
++    "    <button onclick=\"buzz(4000,300)\">Wysoki ton</button>\n"
++    "  </div>\n"
++    "</div>\n"
++    "\n"
++    "<div class=\"card\" style=\"margin-bottom:8px\">\n"
++    "  <h2>&#128421;&#65039; Monitor (logi UART / ESP_LOG)</h2>\n"
++    "  <div style=\"display:flex;gap:10px;align-items:center;margin-bottom:6px;flex-wrap:wrap\">\n"
++    "    <button onclick=\"clearLogs()\">&#128465;&#65039; Wyczy&#347;&#263;</button>\n"
++    "    <label style=\"font-size:0.8em\"><input type=\"checkbox\" id=\"mon-on\" checked> od&#347;wie&#380;anie</label>\n"
++    "    <label style=\"font-size:0.8em\"><input type=\"checkbox\" id=\"mon-scroll\" checked> auto-scroll</label>\n"
++    "    <span id=\"mon-status\" style=\"font-size:0.8em;color:#8b949e\"></span>\n"
++    "  </div>\n"
++    "  <pre id=\"logbox\" style=\"background:#010409;border:1px solid #30363d;border-radius:6px;padding:8px;height:340px;overflow-y:auto;font-size:0.78em;line-height:1.4;white-space:pre-wrap;word-break:break-word;margin:0\"></pre>\n"
+     "</div>\n"
+     "\n"
+     "<script>\n"
+@@ -180,6 +216,17 @@ static const char DASHBOARD_HTML[] =
+     "      document.getElementById('gz').textContent=d.imu.gyro_z.toFixed(1);\n"
+     "      document.getElementById('imu-t').textContent=d.imu.temp.toFixed(1);\n"
+     "    }\n"
++    "    if(d.ina219){\n"
++    "      document.getElementById('in-v').textContent=d.ina219.bus_voltage_v.toFixed(2);\n"
++    "      document.getElementById('in-i').textContent=d.ina219.current_ma.toFixed(0);\n"
++    "      document.getElementById('in-p').textContent=d.ina219.power_mw.toFixed(0);\n"
++    "      document.getElementById('in-addr').innerHTML=d.ina219.initialized?('0x'+d.ina219.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
++    "    }\n"
++    "    if(d.sht40){\n"
++    "      document.getElementById('sh-t').textContent=d.sht40.temperature_c.toFixed(1);\n"
++    "      document.getElementById('sh-h').textContent=d.sht40.humidity_pct.toFixed(1);\n"
++    "      document.getElementById('sh-addr').innerHTML=d.sht40.initialized?('0x'+d.sht40.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
++    "    }\n"
+     "    if(d.odometry){\n"
+     "      document.getElementById('od-l').textContent=d.odometry.dist_left_mm.toFixed(0);\n"
+     "      document.getElementById('od-r').textContent=d.odometry.dist_right_mm.toFixed(0);\n"
+@@ -203,8 +250,33 @@ static const char DASHBOARD_HTML[] =
+     "    document.getElementById('status-bar').innerHTML='<span class=\"err\">&#128997; Brak polaczenia</span>';\n"
+     "  });\n"
+     "}\n"
++    "\n"
++    "function beep(){fetch('/api/buzzer',{method:'POST'});}\n"
++    "function buzz(f,d){fetch('/api/buzzer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq:f,duration_ms:d})});}\n"
++    "\n"
++    "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}\n"
++    "function colorize(t){\n"
++    "  return t.split('\\n').map(function(ln){\n"
++    "    var m=ln.match(/^([EWID]) /);var c=m?('l'+m[1]):'lo';\n"
++    "    return '<span class=\"'+c+'\">'+esc(ln)+'</span>';\n"
++    "  }).join('\\n');\n"
++    "}\n"
++    "function pollLogs(){\n"
++    "  if(!document.getElementById('mon-on').checked)return;\n"
++    "  fetch('/api/logs').then(function(r){return r.text();}).then(function(t){\n"
++    "    var box=document.getElementById('logbox');\n"
++    "    var atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;\n"
++    "    box.innerHTML=colorize(t);\n"
++    "    document.getElementById('mon-status').textContent=t.length+' B';\n"
++    "    if(document.getElementById('mon-scroll').checked&&atBottom){box.scrollTop=box.scrollHeight;}\n"
++    "  }).catch(function(){});\n"
++    "}\n"
++    "function clearLogs(){fetch('/api/logs/clear',{method:'POST'}).then(function(){document.getElementById('logbox').innerHTML='';});}\n"
++    "\n"
+     "poll();\n"
+     "setInterval(poll,1000);\n"
++    "pollLogs();\n"
++    "setInterval(pollLogs,1000);\n"
+     "</script>\n"
+     "</body>\n"
+     "</html>\n";
+@@ -266,6 +338,26 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
+     cJSON_AddBoolToObject(imu, "initialized", id.initialized);
+     cJSON_AddItemToObject(root, "imu", imu);
+ 
++    // INA219 (prad/napiecie)
++    ina219_data_t in = ina219_get_last();
++    cJSON *ina = cJSON_CreateObject();
++    cJSON_AddNumberToObject(ina, "bus_voltage_v",    (double)in.bus_voltage_v);
++    cJSON_AddNumberToObject(ina, "shunt_voltage_mv", (double)in.shunt_voltage_mv);
++    cJSON_AddNumberToObject(ina, "current_ma",       (double)in.current_ma);
++    cJSON_AddNumberToObject(ina, "power_mw",         (double)in.power_mw);
++    cJSON_AddNumberToObject(ina, "address",          in.address);
++    cJSON_AddBoolToObject(ina, "initialized",        in.initialized);
++    cJSON_AddItemToObject(root, "ina219", ina);
++
++    // SHT40 (temperatura/wilgotnosc)
++    sht40_data_t sh = sht40_get_last();
++    cJSON *sht = cJSON_CreateObject();
++    cJSON_AddNumberToObject(sht, "temperature_c", (double)sh.temperature_c);
++    cJSON_AddNumberToObject(sht, "humidity_pct",  (double)sh.humidity_pct);
++    cJSON_AddNumberToObject(sht, "address",       sh.address);
++    cJSON_AddBoolToObject(sht, "initialized",     sh.initialized);
++    cJSON_AddItemToObject(root, "sht40", sht);
++
+     // Odometria
+     odometry_data_t od = odometry_get();
+     cJSON *odo = cJSON_CreateObject();
+@@ -356,10 +448,54 @@ static esp_err_t handle_odo_reset(httpd_req_t *req) {
+     return ESP_OK;
+ }
+ 
++// ── GET /api/logs  (monitor szeregowy przez WWW) ─────────────
++static esp_err_t handle_logs(httpd_req_t *req) {
++    size_t cap = 8200;
++    char *buf = malloc(cap);
++    if (!buf) {
++        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
++        return ESP_FAIL;
++    }
++    size_t n = web_monitor_dump(buf, cap);
++    httpd_resp_set_type(req, "text/plain; charset=utf-8");
++    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
++    httpd_resp_send(req, buf, n);
++    free(buf);
++    return ESP_OK;
++}
++
++// ── POST /api/logs/clear ─────────────────────────────────────
++static esp_err_t handle_logs_clear(httpd_req_t *req) {
++    web_monitor_clear();
++    httpd_resp_sendstr(req, "{\"ok\":true}");
++    return ESP_OK;
++}
++
++// ── POST /api/buzzer  {opcjonalnie "freq","duration_ms"} ─────
++static esp_err_t handle_buzzer(httpd_req_t *req) {
++    int freq = 2000, dur = 200;
++    if (req->content_len > 0) {
++        char buf[128];
++        if (read_body(req, buf, sizeof(buf)) > 0) {
++            cJSON *j = cJSON_Parse(buf);
++            if (j) {
++                cJSON *f = cJSON_GetObjectItem(j, "freq");
++                cJSON *d = cJSON_GetObjectItem(j, "duration_ms");
++                if (cJSON_IsNumber(f)) freq = (int)f->valuedouble;
++                if (cJSON_IsNumber(d)) dur  = (int)d->valuedouble;
++                cJSON_Delete(j);
++            }
++        }
++    }
++    buzzer_tone((uint32_t)freq, (uint32_t)dur);
++    httpd_resp_sendstr(req, "{\"ok\":true}");
++    return ESP_OK;
++}
++
+ esp_err_t http_server_start(void) {
+     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+     cfg.server_port        = 80;
+-    cfg.max_uri_handlers   = 10;
++    cfg.max_uri_handlers   = 16;
+     cfg.stack_size         = 8192;
+ 
+     if (httpd_start(&s_server, &cfg) != ESP_OK) {
+@@ -374,9 +510,13 @@ esp_err_t http_server_start(void) {
+         { .uri="/api/motor/stop",     .method=HTTP_POST, .handler=handle_motor_stop },
+         { .uri="/api/led",            .method=HTTP_POST, .handler=handle_led        },
+         { .uri="/api/odometry/reset", .method=HTTP_POST, .handler=handle_odo_reset  },
++        { .uri="/api/logs",           .method=HTTP_GET,  .handler=handle_logs       },
++        { .uri="/api/logs/clear",     .method=HTTP_POST, .handler=handle_logs_clear },
++        { .uri="/api/buzzer",         .method=HTTP_POST, .handler=handle_buzzer     },
+     };
+ 
+-    for (int i = 0; i < 6; i++)
++    int n_routes = sizeof(routes) / sizeof(routes[0]);
++    for (int i = 0; i < n_routes; i++)
+         httpd_register_uri_handler(s_server, &routes[i]);
+ 
+     ESP_LOGI(TAG, "HTTP server uruchomiony na porcie 80");
+diff --git a/main/imu.c b/main/imu.c
+index a8a971b..cc1885d 100644
+--- a/main/imu.c
++++ b/main/imu.c
+@@ -2,6 +2,8 @@
+ #include "config.h"
+ #include "driver/i2c.h"
+ #include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
+ 
+ static const char *TAG = "IMU";
+ 
+@@ -17,11 +19,12 @@ static const char *TAG = "IMU";
+ #define ICM_WHO_AM_I_EXPECTED 0xEA
+ 
+ static imu_data_t s_last = {0};
++static uint8_t    s_addr = ICM20948_ADDR;   // ustalany w imu_init (0x68/0x69)
+ 
+ static esp_err_t icm_write(uint8_t reg, uint8_t val) {
+     i2c_cmd_handle_t h = i2c_cmd_link_create();
+     i2c_master_start(h);
+-    i2c_master_write_byte(h, (ICM20948_ADDR << 1) | I2C_MASTER_WRITE, true);
++    i2c_master_write_byte(h, (s_addr << 1) | I2C_MASTER_WRITE, true);
+     i2c_master_write_byte(h, reg, true);
+     i2c_master_write_byte(h, val, true);
+     i2c_master_stop(h);
+@@ -33,10 +36,10 @@ static esp_err_t icm_write(uint8_t reg, uint8_t val) {
+ static esp_err_t icm_read(uint8_t reg, uint8_t *buf, size_t len) {
+     i2c_cmd_handle_t h = i2c_cmd_link_create();
+     i2c_master_start(h);
+-    i2c_master_write_byte(h, (ICM20948_ADDR << 1) | I2C_MASTER_WRITE, true);
++    i2c_master_write_byte(h, (s_addr << 1) | I2C_MASTER_WRITE, true);
+     i2c_master_write_byte(h, reg, true);
+     i2c_master_start(h);
+-    i2c_master_write_byte(h, (ICM20948_ADDR << 1) | I2C_MASTER_READ, true);
++    i2c_master_write_byte(h, (s_addr << 1) | I2C_MASTER_READ, true);
+     if (len > 1) i2c_master_read(h, buf, len - 1, I2C_MASTER_ACK);
+     i2c_master_read_byte(h, buf + len - 1, I2C_MASTER_NACK);
+     i2c_master_stop(h);
+@@ -53,30 +56,41 @@ static int16_t to_int16(uint8_t h, uint8_t l) {
+     return (int16_t)((uint16_t)h << 8 | l);
+ }
+ 
+-esp_err_t imu_init(void) {
++// Probuje odczytac WHO_AM_I pod podanym adresem.
++static bool icm_check_addr(uint8_t addr) {
++    s_addr = addr;
+     select_bank(0);
+     uint8_t who = 0;
+-    esp_err_t ret = icm_read(REG_WHO_AM_I, &who, 1);
+-    if (ret != ESP_OK) {
+-        ESP_LOGE(TAG, "ICM-20948 brak odpowiedzi (err=%d)", ret);
+-        s_last.initialized = false;
+-        return ret;
++    if (icm_read(REG_WHO_AM_I, &who, 1) != ESP_OK) return false;
++    return (who == ICM_WHO_AM_I_EXPECTED);
++}
++
++esp_err_t imu_init(void) {
++    s_last.initialized = false;
++
++    // Auto-wykrywanie adresu: 0x68 (AD0=GND) lub 0x69 (AD0=VCC)
++    uint8_t found = 0;
++    const uint8_t candidates[] = { ICM20948_ADDR, 0x68, 0x69 };
++    for (size_t i = 0; i < sizeof(candidates); i++) {
++        if (icm_check_addr(candidates[i])) { found = candidates[i]; break; }
+     }
+-    if (who != ICM_WHO_AM_I_EXPECTED) {
+-        ESP_LOGE(TAG, "WHO_AM_I=0x%02X (oczekiwano 0xEA)", who);
+-        s_last.initialized = false;
++    if (!found) {
++        ESP_LOGE(TAG, "ICM-20948 nie znaleziony (WHO_AM_I != 0xEA pod 0x68/0x69)");
+         return ESP_ERR_NOT_FOUND;
+     }
++    s_addr = found;
+ 
+-    // Wybudź układ, wybierz auto-zegar
+-    icm_write(REG_PWR_MGMT1, 0x01);
++    // Miekki reset, potem wybudzenie
++    icm_write(REG_PWR_MGMT1, 0x80);
++    vTaskDelay(pdMS_TO_TICKS(50));
++    select_bank(0);
++    icm_write(REG_PWR_MGMT1, 0x01);   // auto-zegar
+     vTaskDelay(pdMS_TO_TICKS(10));
+-    // Włącz accel + gyro
+-    icm_write(REG_PWR_MGMT2, 0x00);
++    icm_write(REG_PWR_MGMT2, 0x00);   // accel + gyro ON
+     vTaskDelay(pdMS_TO_TICKS(10));
+ 
+     s_last.initialized = true;
+-    ESP_LOGI(TAG, "ICM-20948 OK (WHO_AM_I=0x%02X)", who);
++    ESP_LOGI(TAG, "ICM-20948 OK pod adresem 0x%02X (WHO_AM_I=0xEA)", s_addr);
+     return ESP_OK;
+ }
+ 
+diff --git a/main/ina219.c b/main/ina219.c
+new file mode 100644
+index 0000000..9afb1ec
+--- /dev/null
++++ b/main/ina219.c
+@@ -0,0 +1,116 @@
++#include "ina219.h"
++#include "config.h"
++#include "driver/i2c.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++
++static const char *TAG = "INA219";
++
++// ── Rejestry INA219 ──
++#define INA_REG_CONFIG      0x00
++#define INA_REG_SHUNT_V     0x01
++#define INA_REG_BUS_V       0x02
++#define INA_REG_POWER       0x03
++#define INA_REG_CURRENT     0x04
++#define INA_REG_CALIB       0x05
++
++// Konfiguracja: 32V, PGA /8 (+/-320mV), 12-bit, ciagly pomiar shunt+bus.
++// To jest takze wartosc domyslna po resecie (0x399F).
++#define INA_CONFIG_DEFAULT  0x399F
++#define INA_CONFIG_RESET    0x8000
++
++static ina219_data_t s_last = {0};
++
++// Lista adresow do przeszukania. 0x45 = A0,A1 -> VBAT (wg schematu).
++// 0x44 nalezy do SHT40, wiec jest na koncu i tak nigdy nie powinien
++// zostac wybrany dla INA (weryfikacja przez odczyt rejestru CONFIG).
++static const uint8_t s_candidates[] = { INA219_ADDR, 0x40, 0x41, 0x45, 0x44 };
++
++// ── Zapis 16-bit (big-endian) do rejestru ──
++static esp_err_t ina_write16(uint8_t addr, uint8_t reg, uint16_t val) {
++    uint8_t data[3] = { reg, (uint8_t)(val >> 8), (uint8_t)(val & 0xFF) };
++    i2c_cmd_handle_t h = i2c_cmd_link_create();
++    i2c_master_start(h);
++    i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_WRITE, true);
++    i2c_master_write(h, data, sizeof(data), true);
++    i2c_master_stop(h);
++    esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(50));
++    i2c_cmd_link_delete(h);
++    return ret;
++}
++
++// ── Odczyt 16-bit (big-endian) z rejestru ──
++static esp_err_t ina_read16(uint8_t addr, uint8_t reg, uint16_t *out) {
++    uint8_t buf[2] = {0};
++    i2c_cmd_handle_t h = i2c_cmd_link_create();
++    i2c_master_start(h);
++    i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_WRITE, true);
++    i2c_master_write_byte(h, reg, true);
++    i2c_master_start(h);
++    i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_READ, true);
++    i2c_master_read_byte(h, &buf[0], I2C_MASTER_ACK);
++    i2c_master_read_byte(h, &buf[1], I2C_MASTER_NACK);
++    i2c_master_stop(h);
++    esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(50));
++    i2c_cmd_link_delete(h);
++    if (ret == ESP_OK) *out = (uint16_t)((buf[0] << 8) | buf[1]);
++    return ret;
++}
++
++// Sprawdza czy pod danym adresem faktycznie siedzi INA219:
++// zapisuje konfiguracje i czyta ja z powrotem.
++static bool ina_probe(uint8_t addr) {
++    if (ina_write16(addr, INA_REG_CONFIG, INA_CONFIG_DEFAULT) != ESP_OK)
++        return false;
++    vTaskDelay(pdMS_TO_TICKS(2));
++    uint16_t cfg = 0;
++    if (ina_read16(addr, INA_REG_CONFIG, &cfg) != ESP_OK)
++        return false;
++    // Po zapisie powinnismy odczytac dokladnie to co wpisalismy.
++    return (cfg == INA_CONFIG_DEFAULT);
++}
++
++esp_err_t ina219_init(void) {
++    s_last.initialized = false;
++    s_last.address     = 0;
++
++    for (size_t i = 0; i < sizeof(s_candidates); i++) {
++        uint8_t addr = s_candidates[i];
++        if (ina_probe(addr)) {
++            s_last.address     = addr;
++            s_last.initialized = true;
++            ESP_LOGI(TAG, "INA219 OK pod adresem 0x%02X (bocznik=%.3f Ohm)",
++                     addr, (double)INA219_SHUNT_OHMS);
++            return ESP_OK;
++        }
++    }
++    ESP_LOGE(TAG, "INA219 nie wykryty (sprawdz adres A0/A1 i magistrale I2C)");
++    return ESP_ERR_NOT_FOUND;
++}
++
++esp_err_t ina219_read(ina219_data_t *out) {
++    if (!s_last.initialized) return ESP_ERR_INVALID_STATE;
++
++    uint16_t bus_raw = 0, shunt_raw = 0;
++    esp_err_t rb = ina_read16(s_last.address, INA_REG_BUS_V,   &bus_raw);
++    esp_err_t rs = ina_read16(s_last.address, INA_REG_SHUNT_V, &shunt_raw);
++    if (rb != ESP_OK || rs != ESP_OK) return ESP_FAIL;
++
++    // Bus voltage: bity [15:3], LSB = 4 mV
++    s_last.bus_voltage_v = (float)(bus_raw >> 3) * 0.004f;
++
++    // Shunt voltage: wartosc ze znakiem, LSB = 10 uV = 0.01 mV
++    int16_t shunt_signed   = (int16_t)shunt_raw;
++    s_last.shunt_voltage_mv = (float)shunt_signed * 0.01f;
++
++    // Prad liczony programowo: I = U_shunt / R_shunt
++    // (mV / Ohm = mA), dzieki czemu nie zalezymy od rejestru kalibracji.
++    s_last.current_ma = s_last.shunt_voltage_mv / INA219_SHUNT_OHMS;
++    s_last.power_mw   = s_last.bus_voltage_v * s_last.current_ma;
++
++    if (out) *out = s_last;
++    return ESP_OK;
++}
++
++ina219_data_t ina219_get_last(void) { return s_last; }
+diff --git a/main/ina219.h b/main/ina219.h
+new file mode 100644
+index 0000000..b8e6d64
+--- /dev/null
++++ b/main/ina219.h
+@@ -0,0 +1,24 @@
++#pragma once
++#include <esp_err.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++// ============================================================
++//  INA219 – monitor pradu/napiecia (I2C)
++//  Bocznik R13 = 0.05 Ohm (patrz config.h INA219_SHUNT_OHMS)
++//  Adres ustalany automatycznie (patrz INA219_ADDR + lista
++//  kandydatow w ina219.c).
++// ============================================================
++
++typedef struct {
++    float    bus_voltage_v;   // napiecie szyny [V]
++    float    shunt_voltage_mv;// spadek na boczniku [mV]
++    float    current_ma;      // prad [mA]
++    float    power_mw;        // moc [mW]
++    uint8_t  address;         // wykryty adres I2C (0 = brak)
++    bool     initialized;
++} ina219_data_t;
++
++esp_err_t     ina219_init(void);
++esp_err_t     ina219_read(ina219_data_t *out);
++ina219_data_t ina219_get_last(void);
+diff --git a/main/lidar.c b/main/lidar.c
+index 18c976d..6bb9ddf 100644
+--- a/main/lidar.c
++++ b/main/lidar.c
+@@ -18,6 +18,11 @@ static const char *TAG = "LIDAR";
+ static lidar_packet_t s_last  = {0};
+ static TaskHandle_t   s_task  = NULL;
+ 
++// Liczniki diagnostyczne (widoczne na monitorze webowym)
++static volatile uint32_t s_rx_bytes    = 0;
++static volatile uint32_t s_ok_packets  = 0;
++static volatile uint32_t s_crc_errors  = 0;
++
+ // CRC8/Maxim (Dallas) – używane przez LD06
+ static uint8_t crc8(const uint8_t *data, uint8_t len) {
+     uint8_t crc = 0;
+@@ -32,15 +37,32 @@ static uint8_t crc8(const uint8_t *data, uint8_t len) {
+ static void lidar_task(void *arg) {
+     uint8_t buf[LD06_PACKET_LEN];
+     uint8_t byte;
++    TickType_t last_report = xTaskGetTickCount();
+ 
+     while (1) {
++        // Co ~2 s raportuj statystyki (diagnostyka na monitorze webowym)
++        if (xTaskGetTickCount() - last_report > pdMS_TO_TICKS(2000)) {
++            last_report = xTaskGetTickCount();
++            ESP_LOGI(TAG, "RX=%lu B/2s, pakiety_OK=%lu, CRC_err=%lu, min=%u mm",
++                     (unsigned long)s_rx_bytes, (unsigned long)s_ok_packets,
++                     (unsigned long)s_crc_errors, lidar_get_min_distance_mm());
++            if (s_rx_bytes == 0) {
++                ESP_LOGW(TAG, "Brak danych z LIDARa! Sprawdz: zasilanie 5V, "
++                              "TX LIDARa -> GPIO%d, baud=%d.", PIN_LIDAR_RX, LIDAR_BAUD_RATE);
++            }
++            s_rx_bytes = 0;
++        }
++
+         // Szukaj bajtu startowego
+-        if (uart_read_bytes(LIDAR_UART_PORT, &byte, 1, pdMS_TO_TICKS(50)) != 1) continue;
++        int r = uart_read_bytes(LIDAR_UART_PORT, &byte, 1, pdMS_TO_TICKS(50));
++        if (r != 1) continue;
++        s_rx_bytes++;
+         if (byte != LD06_START_BYTE) continue;
+ 
+         // Wczytaj resztę pakietu
+         int got = uart_read_bytes(LIDAR_UART_PORT, buf + 1, LD06_PACKET_LEN - 1, pdMS_TO_TICKS(100));
+         if (got != LD06_PACKET_LEN - 1) continue;
++        s_rx_bytes += got;
+         buf[0] = LD06_START_BYTE;
+ 
+         if (buf[1] != LD06_DATATYPE) continue;
+@@ -48,13 +70,14 @@ static void lidar_task(void *arg) {
+         // Sprawdź CRC (ostatni bajt)
+         uint8_t expected_crc = crc8(buf, LD06_PACKET_LEN - 1);
+         if (expected_crc != buf[LD06_PACKET_LEN - 1]) {
+-            ESP_LOGW(TAG, "CRC error");
++            s_crc_errors++;
+             continue;
+         }
+ 
+         // Parsuj pakiet
+         lidar_packet_t pkt = {0};
+-        pkt.speed_rpm = (uint16_t)((buf[3] << 8) | buf[2]) / 100;
++        // Pole "speed" LD06/LD19 jest w stopniach/s => RPM = (deg/s)/6
++        pkt.speed_rpm = (uint16_t)(((buf[3] << 8) | buf[2]) / 6);
+         uint16_t start_angle = (uint16_t)((buf[5] << 8) | buf[4]);
+         uint16_t end_angle   = (uint16_t)((buf[43] << 8) | buf[42]);
+ 
+@@ -72,6 +95,7 @@ static void lidar_task(void *arg) {
+         pkt.count = 12;
+         pkt.valid  = true;
+         s_last = pkt;
++        s_ok_packets++;
+     }
+ }
+ 
+@@ -84,15 +108,16 @@ void lidar_init(void) {
+         .flow_ctrl  = UART_HW_FLOWCTRL_DISABLE,
+         .source_clk = UART_SCLK_APB,
+     };
+-    uart_driver_install(LIDAR_UART_PORT, 1024, 0, 0, NULL, 0);
++    uart_driver_install(LIDAR_UART_PORT, 2048, 0, 0, NULL, 0);
+     uart_param_config(LIDAR_UART_PORT, &cfg);
+     uart_set_pin(LIDAR_UART_PORT, PIN_LIDAR_TX, PIN_LIDAR_RX,
+                  UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+ 
+     xTaskCreate(lidar_task, "lidar", 4096, NULL, 5, &s_task);
+-    ESP_LOGI(TAG, "LIDAR (LD06) init OK – UART%d baud=%d",
+-             LIDAR_UART_PORT, LIDAR_BAUD_RATE);
+-    ESP_LOGW(TAG, "GPIO1/3 zajete przez LIDAR – monitor USB nieaktywny!");
++    ESP_LOGI(TAG, "LIDAR (LD06/LD14P) init OK – UART%d, baud=%d, RX=GPIO%d",
++             LIDAR_UART_PORT, LIDAR_BAUD_RATE, PIN_LIDAR_RX);
++    ESP_LOGW(TAG, "GPIO1/3 zajete przez LIDAR – monitor USB nieaktywny "
++                  "(uzyj monitora webowego w panelu).");
+ }
+ 
+ void lidar_stop(void) {
+diff --git a/main/main.c b/main/main.c
+index a058a0f..5d31a37 100644
+--- a/main/main.c
++++ b/main/main.c
+@@ -12,9 +12,13 @@
+ #include "odometry.h"
+ #include "pyrometer.h"
+ #include "imu.h"
++#include "ina219.h"
++#include "sht40.h"
++#include "buzzer.h"
+ #include "lidar.h"
+ #include "wifi_manager.h"
+ #include "http_server.h"
++#include "web_monitor.h"
+ 
+ static const char *TAG = "MAIN";
+ 
+@@ -34,14 +38,52 @@ static void i2c_init(void) {
+              PIN_I2C_SDA, PIN_I2C_SCL, I2C_FREQ_HZ);
+ }
+ 
++// ─── Skaner I2C – wypisuje wykryte adresy na monitor (web/UART) ─
++static void i2c_scan(void) {
++    ESP_LOGI(TAG, "Skanowanie magistrali I2C...");
++    int found = 0;
++    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
++        i2c_cmd_handle_t h = i2c_cmd_link_create();
++        i2c_master_start(h);
++        i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_WRITE, true);
++        i2c_master_stop(h);
++        esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(30));
++        i2c_cmd_link_delete(h);
++        if (ret == ESP_OK) {
++            const char *name = "?";
++            if (addr == 0x5A) name = "MLX90614 (pirometr)";
++            else if (addr == 0x68 || addr == 0x69) name = "ICM-20948 (IMU)";
++            else if (addr == 0x44) name = "SHT40";
++            else if (addr >= 0x40 && addr <= 0x4F) name = "INA219";
++            ESP_LOGI(TAG, "  -> wykryto 0x%02X  [%s]", addr, name);
++            found++;
++        }
++    }
++    if (found == 0) {
++        ESP_LOGW(TAG, "  Nie wykryto ZADNEGO ukladu I2C! Sprawdz: zasilanie czujnikow, "
++                      "rezystory podciagajace SDA/SCL, oraz piny GPIO%d/GPIO%d.",
++                      PIN_I2C_SDA, PIN_I2C_SCL);
++    } else {
++        ESP_LOGI(TAG, "Skan I2C zakonczony – znaleziono %d ukl.", found);
++    }
++}
++
+ // ─── Task: odczyt czujników co 100 ms ──────────────────────
+ static void sensor_task(void *arg) {
+     imu_data_t      imu;
+     pyrometer_data_t pyro;
++    ina219_data_t   ina;
++    int slow = 0;
+ 
+     while (1) {
+         imu_read(&imu);
+         pyrometer_read(&pyro);
++        ina219_read(&ina);
++        // SHT40 (temperatura/wilgotnosc) zmienia sie wolno – co ~1 s
++        if (++slow >= 10) {
++            slow = 0;
++            sht40_read(NULL);
++        }
+         // line_sensor i odometria są nieblokujące – czytane
+         // bezpośrednio z http_server przy każdym żądaniu.
+ 
+@@ -71,6 +113,10 @@ static void led_startup_blink(void) {
+ 
+ // ─── app_main ───────────────────────────────────────────────
+ void app_main(void) {
++    // Monitor webowy MUSI byc pierwszy – przechwytuje wszystkie logi
++    // (zamiast martwej konsoli UART, ktora zajmuje LIDAR).
++    web_monitor_init();
++
+     ESP_LOGI(TAG, "=== Autonomous Vehicle – Start ===");
+ 
+     // NVS (wymagane przez WiFi)
+@@ -83,8 +129,10 @@ void app_main(void) {
+     // ── Sprzęt ──
+     led_init();
+     led_startup_blink();
++    buzzer_init();
+ 
+     i2c_init();
++    i2c_scan();             // pokaze realne adresy na monitorze webowym
+     motor_init();
+     line_sensor_init();
+     odometry_init();
+@@ -96,6 +144,12 @@ void app_main(void) {
+     if (pyrometer_init() != ESP_OK)
+         ESP_LOGW(TAG, "Pirometr nie wykryty – kontynuuję bez pirometru");
+ 
++    if (ina219_init() != ESP_OK)
++        ESP_LOGW(TAG, "INA219 nie wykryty – kontynuuję bez pomiaru pradu");
++
++    if (sht40_init() != ESP_OK)
++        ESP_LOGW(TAG, "SHT40 nie wykryty – kontynuuję bez temp/wilgotnosci");
++
+     // ── LIDAR (można wyłączyć przez LIDAR_ENABLED 0 w config.h) ──
+     lidar_init();
+ 
+@@ -105,6 +159,7 @@ void app_main(void) {
+ 
+     // ── Sygnał gotowości ──
+     led_set_green(true);
++    buzzer_beep();          // krotki sygnal: system wstal
+     ESP_LOGI(TAG, "System gotowy. Dashboard: http://<IP_ESP32>/");
+ 
+     // ── Uruchom taski FreeRTOS ──
+diff --git a/main/sht40.c b/main/sht40.c
+new file mode 100644
+index 0000000..d49e943
+--- /dev/null
++++ b/main/sht40.c
+@@ -0,0 +1,109 @@
++#include "sht40.h"
++#include "config.h"
++#include "driver/i2c.h"
++#include "esp_log.h"
++#include "freertos/FreeRTOS.h"
++#include "freertos/task.h"
++
++static const char *TAG = "SHT40";
++
++// ── Komendy SHT40 ──
++#define SHT40_CMD_MEAS_HIGH   0xFD   // pomiar T+RH, wysoka precyzja (~8.2 ms)
++#define SHT40_CMD_SOFT_RESET  0x94
++
++static sht40_data_t s_last = {0};
++
++// Adresy do przeszukania (standard to 0x44)
++static const uint8_t s_candidates[] = { SHT40_ADDR, 0x44, 0x45, 0x46 };
++
++// CRC8 wg datasheet Sensirion: wielomian 0x31, init 0xFF
++static uint8_t sht_crc(const uint8_t *data, int len) {
++    uint8_t crc = 0xFF;
++    for (int i = 0; i < len; i++) {
++        crc ^= data[i];
++        for (int b = 0; b < 8; b++)
++            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
++    }
++    return crc;
++}
++
++static esp_err_t sht_send_cmd(uint8_t addr, uint8_t cmd) {
++    i2c_cmd_handle_t h = i2c_cmd_link_create();
++    i2c_master_start(h);
++    i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_WRITE, true);
++    i2c_master_write_byte(h, cmd, true);
++    i2c_master_stop(h);
++    esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(50));
++    i2c_cmd_link_delete(h);
++    return ret;
++}
++
++static esp_err_t sht_read_raw(uint8_t addr, uint8_t *buf6) {
++    i2c_cmd_handle_t h = i2c_cmd_link_create();
++    i2c_master_start(h);
++    i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_READ, true);
++    i2c_master_read(h, buf6, 5, I2C_MASTER_ACK);
++    i2c_master_read_byte(h, buf6 + 5, I2C_MASTER_NACK);
++    i2c_master_stop(h);
++    esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(50));
++    i2c_cmd_link_delete(h);
++    return ret;
++}
++
++// Pelny pomiar: komenda -> czekaj -> odczyt 6 bajtow -> sprawdz CRC
++static esp_err_t sht_measure(uint8_t addr, float *t, float *rh) {
++    if (sht_send_cmd(addr, SHT40_CMD_MEAS_HIGH) != ESP_OK) return ESP_FAIL;
++    vTaskDelay(pdMS_TO_TICKS(10));   // wysoka precyzja: max 8.2 ms
++
++    uint8_t b[6] = {0};
++    if (sht_read_raw(addr, b) != ESP_OK) return ESP_FAIL;
++
++    if (sht_crc(&b[0], 2) != b[2]) return ESP_ERR_INVALID_CRC;
++    if (sht_crc(&b[3], 2) != b[5]) return ESP_ERR_INVALID_CRC;
++
++    uint16_t t_raw  = (uint16_t)((b[0] << 8) | b[1]);
++    uint16_t rh_raw = (uint16_t)((b[3] << 8) | b[4]);
++
++    *t  = -45.0f + 175.0f * ((float)t_raw  / 65535.0f);
++    float h = -6.0f + 125.0f * ((float)rh_raw / 65535.0f);
++    if (h < 0.0f)   h = 0.0f;
++    if (h > 100.0f) h = 100.0f;
++    *rh = h;
++    return ESP_OK;
++}
++
++esp_err_t sht40_init(void) {
++    s_last.initialized = false;
++    s_last.address     = 0;
++
++    for (size_t i = 0; i < sizeof(s_candidates); i++) {
++        uint8_t addr = s_candidates[i];
++        sht_send_cmd(addr, SHT40_CMD_SOFT_RESET);
++        vTaskDelay(pdMS_TO_TICKS(2));
++        float t, rh;
++        if (sht_measure(addr, &t, &rh) == ESP_OK) {
++            s_last.address       = addr;
++            s_last.temperature_c = t;
++            s_last.humidity_pct  = rh;
++            s_last.initialized   = true;
++            ESP_LOGI(TAG, "SHT40 OK pod adresem 0x%02X (T=%.1f C, RH=%.1f%%)",
++                     addr, (double)t, (double)rh);
++            return ESP_OK;
++        }
++    }
++    ESP_LOGE(TAG, "SHT40 nie wykryty (sprawdz adres 0x44 i magistrale I2C)");
++    return ESP_ERR_NOT_FOUND;
++}
++
++esp_err_t sht40_read(sht40_data_t *out) {
++    if (!s_last.initialized) return ESP_ERR_INVALID_STATE;
++    float t, rh;
++    esp_err_t ret = sht_measure(s_last.address, &t, &rh);
++    if (ret != ESP_OK) return ret;
++    s_last.temperature_c = t;
++    s_last.humidity_pct  = rh;
++    if (out) *out = s_last;
++    return ESP_OK;
++}
++
++sht40_data_t sht40_get_last(void) { return s_last; }
+diff --git a/main/sht40.h b/main/sht40.h
+new file mode 100644
+index 0000000..cdc7c0e
+--- /dev/null
++++ b/main/sht40.h
+@@ -0,0 +1,19 @@
++#pragma once
++#include <esp_err.h>
++#include <stdbool.h>
++#include <stdint.h>
++
++// ============================================================
++//  SHT40 – czujnik temperatury i wilgotnosci (I2C, adres 0x44)
++// ============================================================
++
++typedef struct {
++    float    temperature_c;   // [°C]
++    float    humidity_pct;    // [% RH]
++    uint8_t  address;         // wykryty adres I2C (0 = brak)
++    bool     initialized;
++} sht40_data_t;
++
++esp_err_t    sht40_init(void);
++esp_err_t    sht40_read(sht40_data_t *out);
++sht40_data_t sht40_get_last(void);
+diff --git a/main/web_monitor.c b/main/web_monitor.c
+new file mode 100644
+index 0000000..7daf102
+--- /dev/null
++++ b/main/web_monitor.c
+@@ -0,0 +1,92 @@
++#include "web_monitor.h"
++#include "freertos/FreeRTOS.h"
++#include "esp_log.h"
++#include <stdio.h>
++#include <string.h>
++#include <stdarg.h>
++
++// Rozmiar bufora logow (ostatnie ~8 KB tekstu)
++#define LOG_BUF_CAP   8192
++
++static char            s_buf[LOG_BUF_CAP];
++static size_t          s_head  = 0;   // nastepna pozycja zapisu
++static size_t          s_count = 0;   // liczba waznych bajtow (<= CAP)
++static portMUX_TYPE    s_mux   = portMUX_INITIALIZER_UNLOCKED;
++static vprintf_like_t  s_prev_vprintf = NULL;
++
++// Dopisuje pojedynczy bajt do bufora kolowego (pod spinlockiem).
++static inline void buf_put(char c) {
++    s_buf[s_head] = c;
++    s_head = (s_head + 1) % LOG_BUF_CAP;
++    if (s_count < LOG_BUF_CAP) s_count++;
++}
++
++// Hook logowania: formatuje, usuwa kody ANSI, zapisuje do bufora,
++// a takze przekazuje dalej (na wypadek gdyby UART jednak dzialal).
++static int monitor_vprintf(const char *fmt, va_list args) {
++    char line[256];
++    va_list cp;
++    va_copy(cp, args);
++    int n = vsnprintf(line, sizeof(line), fmt, cp);
++    va_end(cp);
++
++    if (n > 0) {
++        int len = (n < (int)sizeof(line)) ? n : (int)sizeof(line) - 1;
++        portENTER_CRITICAL(&s_mux);
++        for (int i = 0; i < len; i++) {
++            char c = line[i];
++            // Pomin sekwencje ANSI: ESC '[' ... <litera>
++            if (c == '\033') {
++                i++;
++                if (i < len && line[i] == '[') {
++                    i++;
++                    while (i < len &&
++                           !((line[i] >= 'A' && line[i] <= 'Z') ||
++                             (line[i] >= 'a' && line[i] <= 'z'))) {
++                        i++;
++                    }
++                }
++                continue; // pomin tez znak konczacy
++            }
++            if (c == '\r') continue;       // bez CR
++            buf_put(c);
++        }
++        portEXIT_CRITICAL(&s_mux);
++    }
++
++    // Przekaz do oryginalnego vprintf (UART), jesli istnial.
++    if (s_prev_vprintf) {
++        return s_prev_vprintf(fmt, args);
++    }
++    return n;
++}
++
++void web_monitor_init(void) {
++    s_prev_vprintf = esp_log_set_vprintf(monitor_vprintf);
++    ESP_LOGI("WEBMON", "Web monitor aktywny – logi dostepne pod /api/logs");
++}
++
++size_t web_monitor_dump(char *out, size_t maxlen) {
++    if (maxlen == 0) return 0;
++    portENTER_CRITICAL(&s_mux);
++    size_t count = s_count;
++    size_t start = (s_head + LOG_BUF_CAP - s_count) % LOG_BUF_CAP;
++    size_t to_copy = (count < maxlen - 1) ? count : maxlen - 1;
++    // Pomijamy najstarsze bajty, jesli bufor wiekszy niz docelowy.
++    if (count > to_copy) {
++        start = (start + (count - to_copy)) % LOG_BUF_CAP;
++    }
++    for (size_t i = 0; i < to_copy; i++) {
++        out[i] = s_buf[(start + i) % LOG_BUF_CAP];
++    }
++    portEXIT_CRITICAL(&s_mux);
++    out[to_copy] = '\0';
++    return to_copy;
++}
++
++void web_monitor_clear(void) {
++    portENTER_CRITICAL(&s_mux);
++    s_head  = 0;
++    s_count = 0;
++    portEXIT_CRITICAL(&s_mux);
++}
+diff --git a/main/web_monitor.h b/main/web_monitor.h
+new file mode 100644
+index 0000000..db087c1
+--- /dev/null
++++ b/main/web_monitor.h
+@@ -0,0 +1,18 @@
++#pragma once
++#include <stddef.h>
++
++// ============================================================
++//  Web Monitor – przechwytuje logi ESP_LOGx do bufora kolowego,
++//  ktory mozna pobrac przez HTTP i wyswietlic w przegladarce
++//  (zamiennik monitora szeregowego, gdy UART zajmuje LIDAR).
++// ============================================================
++
++// Instaluje hook logowania. Wywolaj jak najwczesniej w app_main.
++void web_monitor_init(void);
++
++// Kopiuje zawartosc bufora (od najstarszych) do 'out'.
++// Zwraca liczbe zapisanych bajtow (bez koncowego '\0').
++size_t web_monitor_dump(char *out, size_t maxlen);
++
++// Czysci bufor logow.
++void web_monitor_clear(void);

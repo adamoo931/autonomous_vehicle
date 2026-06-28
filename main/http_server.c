@@ -4,12 +4,17 @@
 #include "odometry.h"
 #include "pyrometer.h"
 #include "imu.h"
+#include "ina219.h"
+#include "sht40.h"
+#include "buzzer.h"
 #include "lidar.h"
 #include "line_sensor.h"
+#include "web_monitor.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "cJSON.h"
 #include <string.h>
+#include <stdlib.h>
 
 static const char *TAG = "HTTP";
 static httpd_handle_t s_server = NULL;
@@ -46,6 +51,7 @@ static const char DASHBOARD_HTML[] =
     ".tag-ok{background:#1b3a2d;color:#3fb950}\n"
     ".tag-warn{background:#3a2a0d;color:#d29922}\n"
     "#status-bar{text-align:center;padding:6px;background:#161b22;border-radius:6px;margin-bottom:8px;font-size:0.85em}\n"
+    ".lE{color:#f85149}.lW{color:#d29922}.lI{color:#3fb950}.lD{color:#8b949e}.lo{color:#c9d1d9}\n"
     "</style>\n"
     "</head>\n"
     "<body>\n"
@@ -70,6 +76,19 @@ static const char DASHBOARD_HTML[] =
     "    <div>Ax:<span class=\"val\" id=\"ax\">-</span> Ay:<span class=\"val\" id=\"ay\">-</span> Az:<span class=\"val\" id=\"az\">-</span> g</div>\n"
     "    <div>Gx:<span class=\"val\" id=\"gx\">-</span> Gy:<span class=\"val\" id=\"gy\">-</span> Gz:<span class=\"val\" id=\"gz\">-</span> &#176;/s</div>\n"
     "    <div>T: <span class=\"val\" id=\"imu-t\">-</span> &#176;C</div>\n"
+    "  </div>\n"
+    "  <div class=\"card\">\n"
+    "    <h2>&#9889; INA219 Zasilanie</h2>\n"
+    "    <div>Napi&#281;cie: <span class=\"val\" id=\"in-v\">-</span> V</div>\n"
+    "    <div>Pr&#261;d: <span class=\"val\" id=\"in-i\">-</span> mA</div>\n"
+    "    <div>Moc: <span class=\"val\" id=\"in-p\">-</span> mW</div>\n"
+    "    <div>Adres I2C: <span class=\"val\" id=\"in-addr\">-</span></div>\n"
+    "  </div>\n"
+    "  <div class=\"card\">\n"
+    "    <h2>&#127777;&#65039; SHT40 Klimat</h2>\n"
+    "    <div>Temp.: <span class=\"val\" id=\"sh-t\">-</span> &#176;C</div>\n"
+    "    <div>Wilgotno&#347;&#263;: <span class=\"val\" id=\"sh-h\">-</span> %</div>\n"
+    "    <div>Adres I2C: <span class=\"val\" id=\"sh-addr\">-</span></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#128207; Odometria</h2>\n"
@@ -123,6 +142,23 @@ static const char DASHBOARD_HTML[] =
     "      <button onclick=\"allOff()\">Wy&#322;.</button>\n"
     "    </div>\n"
     "  </div>\n"
+    "  <div class=\"card\">\n"
+    "    <h2>&#128266; Buzzer</h2>\n"
+    "    <button onclick=\"beep()\">&#9658; Test (2 kHz)</button>\n"
+    "    <button onclick=\"buzz(1000,300)\">Niski ton</button>\n"
+    "    <button onclick=\"buzz(4000,300)\">Wysoki ton</button>\n"
+    "  </div>\n"
+    "</div>\n"
+    "\n"
+    "<div class=\"card\" style=\"margin-bottom:8px\">\n"
+    "  <h2>&#128421;&#65039; Monitor (logi UART / ESP_LOG)</h2>\n"
+    "  <div style=\"display:flex;gap:10px;align-items:center;margin-bottom:6px;flex-wrap:wrap\">\n"
+    "    <button onclick=\"clearLogs()\">&#128465;&#65039; Wyczy&#347;&#263;</button>\n"
+    "    <label style=\"font-size:0.8em\"><input type=\"checkbox\" id=\"mon-on\" checked> od&#347;wie&#380;anie</label>\n"
+    "    <label style=\"font-size:0.8em\"><input type=\"checkbox\" id=\"mon-scroll\" checked> auto-scroll</label>\n"
+    "    <span id=\"mon-status\" style=\"font-size:0.8em;color:#8b949e\"></span>\n"
+    "  </div>\n"
+    "  <pre id=\"logbox\" style=\"background:#010409;border:1px solid #30363d;border-radius:6px;padding:8px;height:340px;overflow-y:auto;font-size:0.78em;line-height:1.4;white-space:pre-wrap;word-break:break-word;margin:0\"></pre>\n"
     "</div>\n"
     "\n"
     "<script>\n"
@@ -180,6 +216,17 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('gz').textContent=d.imu.gyro_z.toFixed(1);\n"
     "      document.getElementById('imu-t').textContent=d.imu.temp.toFixed(1);\n"
     "    }\n"
+    "    if(d.ina219){\n"
+    "      document.getElementById('in-v').textContent=d.ina219.bus_voltage_v.toFixed(2);\n"
+    "      document.getElementById('in-i').textContent=d.ina219.current_ma.toFixed(0);\n"
+    "      document.getElementById('in-p').textContent=d.ina219.power_mw.toFixed(0);\n"
+    "      document.getElementById('in-addr').innerHTML=d.ina219.initialized?('0x'+d.ina219.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
+    "    }\n"
+    "    if(d.sht40){\n"
+    "      document.getElementById('sh-t').textContent=d.sht40.temperature_c.toFixed(1);\n"
+    "      document.getElementById('sh-h').textContent=d.sht40.humidity_pct.toFixed(1);\n"
+    "      document.getElementById('sh-addr').innerHTML=d.sht40.initialized?('0x'+d.sht40.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
+    "    }\n"
     "    if(d.odometry){\n"
     "      document.getElementById('od-l').textContent=d.odometry.dist_left_mm.toFixed(0);\n"
     "      document.getElementById('od-r').textContent=d.odometry.dist_right_mm.toFixed(0);\n"
@@ -203,8 +250,33 @@ static const char DASHBOARD_HTML[] =
     "    document.getElementById('status-bar').innerHTML='<span class=\"err\">&#128997; Brak polaczenia</span>';\n"
     "  });\n"
     "}\n"
+    "\n"
+    "function beep(){fetch('/api/buzzer',{method:'POST'});}\n"
+    "function buzz(f,d){fetch('/api/buzzer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq:f,duration_ms:d})});}\n"
+    "\n"
+    "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}\n"
+    "function colorize(t){\n"
+    "  return t.split('\\n').map(function(ln){\n"
+    "    var m=ln.match(/^([EWID]) /);var c=m?('l'+m[1]):'lo';\n"
+    "    return '<span class=\"'+c+'\">'+esc(ln)+'</span>';\n"
+    "  }).join('\\n');\n"
+    "}\n"
+    "function pollLogs(){\n"
+    "  if(!document.getElementById('mon-on').checked)return;\n"
+    "  fetch('/api/logs').then(function(r){return r.text();}).then(function(t){\n"
+    "    var box=document.getElementById('logbox');\n"
+    "    var atBottom=box.scrollTop+box.clientHeight>=box.scrollHeight-20;\n"
+    "    box.innerHTML=colorize(t);\n"
+    "    document.getElementById('mon-status').textContent=t.length+' B';\n"
+    "    if(document.getElementById('mon-scroll').checked&&atBottom){box.scrollTop=box.scrollHeight;}\n"
+    "  }).catch(function(){});\n"
+    "}\n"
+    "function clearLogs(){fetch('/api/logs/clear',{method:'POST'}).then(function(){document.getElementById('logbox').innerHTML='';});}\n"
+    "\n"
     "poll();\n"
     "setInterval(poll,1000);\n"
+    "pollLogs();\n"
+    "setInterval(pollLogs,1000);\n"
     "</script>\n"
     "</body>\n"
     "</html>\n";
@@ -265,6 +337,26 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(imu, "temp",    (double)id.temp);
     cJSON_AddBoolToObject(imu, "initialized", id.initialized);
     cJSON_AddItemToObject(root, "imu", imu);
+
+    // INA219 (prad/napiecie)
+    ina219_data_t in = ina219_get_last();
+    cJSON *ina = cJSON_CreateObject();
+    cJSON_AddNumberToObject(ina, "bus_voltage_v",    (double)in.bus_voltage_v);
+    cJSON_AddNumberToObject(ina, "shunt_voltage_mv", (double)in.shunt_voltage_mv);
+    cJSON_AddNumberToObject(ina, "current_ma",       (double)in.current_ma);
+    cJSON_AddNumberToObject(ina, "power_mw",         (double)in.power_mw);
+    cJSON_AddNumberToObject(ina, "address",          in.address);
+    cJSON_AddBoolToObject(ina, "initialized",        in.initialized);
+    cJSON_AddItemToObject(root, "ina219", ina);
+
+    // SHT40 (temperatura/wilgotnosc)
+    sht40_data_t sh = sht40_get_last();
+    cJSON *sht = cJSON_CreateObject();
+    cJSON_AddNumberToObject(sht, "temperature_c", (double)sh.temperature_c);
+    cJSON_AddNumberToObject(sht, "humidity_pct",  (double)sh.humidity_pct);
+    cJSON_AddNumberToObject(sht, "address",       sh.address);
+    cJSON_AddBoolToObject(sht, "initialized",     sh.initialized);
+    cJSON_AddItemToObject(root, "sht40", sht);
 
     // Odometria
     odometry_data_t od = odometry_get();
@@ -356,10 +448,54 @@ static esp_err_t handle_odo_reset(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ── GET /api/logs  (monitor szeregowy przez WWW) ─────────────
+static esp_err_t handle_logs(httpd_req_t *req) {
+    size_t cap = 8200;
+    char *buf = malloc(cap);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
+        return ESP_FAIL;
+    }
+    size_t n = web_monitor_dump(buf, cap);
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_send(req, buf, n);
+    free(buf);
+    return ESP_OK;
+}
+
+// ── POST /api/logs/clear ─────────────────────────────────────
+static esp_err_t handle_logs_clear(httpd_req_t *req) {
+    web_monitor_clear();
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// ── POST /api/buzzer  {opcjonalnie "freq","duration_ms"} ─────
+static esp_err_t handle_buzzer(httpd_req_t *req) {
+    int freq = 2000, dur = 200;
+    if (req->content_len > 0) {
+        char buf[128];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *f = cJSON_GetObjectItem(j, "freq");
+                cJSON *d = cJSON_GetObjectItem(j, "duration_ms");
+                if (cJSON_IsNumber(f)) freq = (int)f->valuedouble;
+                if (cJSON_IsNumber(d)) dur  = (int)d->valuedouble;
+                cJSON_Delete(j);
+            }
+        }
+    }
+    buzzer_tone((uint32_t)freq, (uint32_t)dur);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
-    cfg.max_uri_handlers   = 10;
+    cfg.max_uri_handlers   = 16;
     cfg.stack_size         = 8192;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -374,9 +510,13 @@ esp_err_t http_server_start(void) {
         { .uri="/api/motor/stop",     .method=HTTP_POST, .handler=handle_motor_stop },
         { .uri="/api/led",            .method=HTTP_POST, .handler=handle_led        },
         { .uri="/api/odometry/reset", .method=HTTP_POST, .handler=handle_odo_reset  },
+        { .uri="/api/logs",           .method=HTTP_GET,  .handler=handle_logs       },
+        { .uri="/api/logs/clear",     .method=HTTP_POST, .handler=handle_logs_clear },
+        { .uri="/api/buzzer",         .method=HTTP_POST, .handler=handle_buzzer     },
     };
 
-    for (int i = 0; i < 6; i++)
+    int n_routes = sizeof(routes) / sizeof(routes[0]);
+    for (int i = 0; i < n_routes; i++)
         httpd_register_uri_handler(s_server, &routes[i]);
 
     ESP_LOGI(TAG, "HTTP server uruchomiony na porcie 80");

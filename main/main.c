@@ -12,9 +12,13 @@
 #include "odometry.h"
 #include "pyrometer.h"
 #include "imu.h"
+#include "ina219.h"
+#include "sht40.h"
+#include "buzzer.h"
 #include "lidar.h"
 #include "wifi_manager.h"
 #include "http_server.h"
+#include "web_monitor.h"
 
 static const char *TAG = "MAIN";
 
@@ -34,14 +38,52 @@ static void i2c_init(void) {
              PIN_I2C_SDA, PIN_I2C_SCL, I2C_FREQ_HZ);
 }
 
+// ─── Skaner I2C – wypisuje wykryte adresy na monitor (web/UART) ─
+static void i2c_scan(void) {
+    ESP_LOGI(TAG, "Skanowanie magistrali I2C...");
+    int found = 0;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        i2c_cmd_handle_t h = i2c_cmd_link_create();
+        i2c_master_start(h);
+        i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_WRITE, true);
+        i2c_master_stop(h);
+        esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(30));
+        i2c_cmd_link_delete(h);
+        if (ret == ESP_OK) {
+            const char *name = "?";
+            if (addr == 0x5A) name = "MLX90614 (pirometr)";
+            else if (addr == 0x68 || addr == 0x69) name = "ICM-20948 (IMU)";
+            else if (addr == 0x44) name = "SHT40";
+            else if (addr >= 0x40 && addr <= 0x4F) name = "INA219";
+            ESP_LOGI(TAG, "  -> wykryto 0x%02X  [%s]", addr, name);
+            found++;
+        }
+    }
+    if (found == 0) {
+        ESP_LOGW(TAG, "  Nie wykryto ZADNEGO ukladu I2C! Sprawdz: zasilanie czujnikow, "
+                      "rezystory podciagajace SDA/SCL, oraz piny GPIO%d/GPIO%d.",
+                      PIN_I2C_SDA, PIN_I2C_SCL);
+    } else {
+        ESP_LOGI(TAG, "Skan I2C zakonczony – znaleziono %d ukl.", found);
+    }
+}
+
 // ─── Task: odczyt czujników co 100 ms ──────────────────────
 static void sensor_task(void *arg) {
     imu_data_t      imu;
     pyrometer_data_t pyro;
+    ina219_data_t   ina;
+    int slow = 0;
 
     while (1) {
         imu_read(&imu);
         pyrometer_read(&pyro);
+        ina219_read(&ina);
+        // SHT40 (temperatura/wilgotnosc) zmienia sie wolno – co ~1 s
+        if (++slow >= 10) {
+            slow = 0;
+            sht40_read(NULL);
+        }
         // line_sensor i odometria są nieblokujące – czytane
         // bezpośrednio z http_server przy każdym żądaniu.
 
@@ -71,6 +113,10 @@ static void led_startup_blink(void) {
 
 // ─── app_main ───────────────────────────────────────────────
 void app_main(void) {
+    // Monitor webowy MUSI byc pierwszy – przechwytuje wszystkie logi
+    // (zamiast martwej konsoli UART, ktora zajmuje LIDAR).
+    web_monitor_init();
+
     ESP_LOGI(TAG, "=== Autonomous Vehicle – Start ===");
 
     // NVS (wymagane przez WiFi)
@@ -83,8 +129,10 @@ void app_main(void) {
     // ── Sprzęt ──
     led_init();
     led_startup_blink();
+    buzzer_init();
 
     i2c_init();
+    i2c_scan();             // pokaze realne adresy na monitorze webowym
     motor_init();
     line_sensor_init();
     odometry_init();
@@ -96,6 +144,12 @@ void app_main(void) {
     if (pyrometer_init() != ESP_OK)
         ESP_LOGW(TAG, "Pirometr nie wykryty – kontynuuję bez pirometru");
 
+    if (ina219_init() != ESP_OK)
+        ESP_LOGW(TAG, "INA219 nie wykryty – kontynuuję bez pomiaru pradu");
+
+    if (sht40_init() != ESP_OK)
+        ESP_LOGW(TAG, "SHT40 nie wykryty – kontynuuję bez temp/wilgotnosci");
+
     // ── LIDAR (można wyłączyć przez LIDAR_ENABLED 0 w config.h) ──
     lidar_init();
 
@@ -105,6 +159,7 @@ void app_main(void) {
 
     // ── Sygnał gotowości ──
     led_set_green(true);
+    buzzer_beep();          // krotki sygnal: system wstal
     ESP_LOGI(TAG, "System gotowy. Dashboard: http://<IP_ESP32>/");
 
     // ── Uruchom taski FreeRTOS ──

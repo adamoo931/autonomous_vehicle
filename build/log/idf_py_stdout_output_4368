@@ -1,0 +1,120 @@
+Command: C:\Espressif\tools\python\v6.0.1\venv\Scripts\python.exe C:\esp\v6.0.1\esp-idf\tools/idf_monitor.py -p COM3 -b 115200 --toolchain-prefix xtensa-esp32-elf- --target esp32 --revision 0 C:\Projects\autonomous_vehicle\build\autonomous_vehicle.elf C:\Projects\autonomous_vehicle\build\bootloader\bootloader.elf --force-color -m 'C:\Espressif\tools\python\v6.0.1\venv\Scripts\python.exe' 'C:\esp\v6.0.1\esp-idf\tools\idf.py'
+ets Jul 29 2019 12:21:46
+
+rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0040,len:6272
+load:0x40078000,len:15848
+load:0x40080400,len:3920
+entry 0x40080644
+[0;32mI (27) boot: ESP-IDF v6.0.1 2nd stage bootloader[0m
+[0;32mI (27) boot: compile time Jun 26 2026 16:10:41[0m
+[0;32mI (28) boot: Multicore bootloader[0m
+[0;32mI (29) boot: chip revision: v3.1[0m
+[0;32mI (32) boot.esp32: SPI Speed      : 40MHz[0m
+[0;32mI (35) boot.esp32: SPI Mode       : DIO[0m
+[0;32mI (39) boot.esp32: SPI Flash Size : 2MB[0m
+[0;32mI (42) boot: Enabling RNG early entropy source...[0m
+[0;32mI (47) boot: Partition Table:[0m
+[0;32mI (49) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (62) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (69) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (75) boot: End of partition table[0m
+[0;32mI (79) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=21a40h (137792) map[0m
+[0;32mI (135) esp_image: segment 1: paddr=00031a68 vaddr=3ffb0000 size=0461ch ( 17948) load[0m
+[0;32mI (142) esp_image: segment 2: paddr=0003608c vaddr=40080000 size=09f8ch ( 40844) load[0m
+[0;32mI (159) esp_image: segment 3: paddr=00040020 vaddr=400d0020 size=97b8ch (621452) map[0m
+[0;32mI (381) esp_image: segment 4: paddr=000d7bb4 vaddr=40089f8c size=0cdd0h ( 52688) load[0m
+[0;32mI (403) esp_image: segment 5: paddr=000e498c vaddr=50000000 size=00028h (    40) load[0m
+[0;32mI (414) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (415) boot: Disabling RNG early entropy source...[0m
+[0;32mI (425) cpu_start: Multicore app[0m
+[0;32mI (433) cpu_start: GPIO 3 and 1 are used as console UART I/O pins[0m
+[0;32mI (434) cpu_start: Pro cpu start user code[0m
+[0;32mI (434) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (435) app_init: Application information:[0m
+[0;32mI (439) app_init: Project name:     autonomous_vehicle[0m
+[0;32mI (444) app_init: App version:      b68f185-dirty[0m
+[0;32mI (449) app_init: Compile time:     Jun 28 2026 02:59:31[0m
+[0;32mI (454) app_init: ELF file SHA256:  2fb9ab182...[0m
+[0;32mI (458) app_init: ESP-IDF:          v6.0.1[0m
+[0;32mI (462) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (466) efuse_init: Max chip rev:     v3.99 [0m
+[0;32mI (470) efuse_init: Chip rev:         v3.1[0m
+[0;32mI (474) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (480) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM[0m
+[0;32mI (485) heap_init: At 3FFBAB68 len 00025498 (149 KiB): DRAM[0m
+[0;32mI (490) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM[0m
+[0;32mI (495) heap_init: At 3FFE4350 len 0001BCB0 (111 KiB): D/IRAM[0m
+[0;32mI (501) heap_init: At 40096D5C len 000092A4 (36 KiB): IRAM[0m
+[0;32mI (508) spi_flash: detected chip: generic[0m
+[0;32mI (510) spi_flash: flash io: dio[0m
+[0;33mW (513) spi_flash: Detected size(4096k) larger than the size in the binary image header(2048k). Using the size in the binary image header.[0m
+[0;33mW (525) i2c: This driver is an old driver, please migrate your application code to adapt `driver/i2c_master.h`[0m
+[0;32mI (536) main_task: Started on CPU0[0m
+[0;32mI (546) main_task: Calling app_main()[0m
+[0;32mI (546) WEBMON: Web monitor aktywny – logi dostepne pod /api/logs[0m
+[0;32mI (546) MAIN: === Autonomous Vehicle – Start ===[0m
+[0;32mI (586) LED: LED initialized[0m
+[0;32mI (1486) BUZZER: Buzzer initialized (GPIO25)[0m
+[0;32mI (1486) MAIN: I2C OK (SDA=GPIO21, SCL=GPIO22, 100000 Hz)[0m
+[0;32mI (1486) MAIN: Skanowanie magistrali I2C...[0m
+[0;32mI (1496) MAIN:   -> wykryto 0x40  [INA219][0m
+[0;32mI (1506) MAIN:   -> wykryto 0x5A  [MLX90614 (pirometr)][0m
+[0;32mI (1506) MAIN: Skan I2C zakonczony – znaleziono 2 ukl.[0m
+[0;32mI (1516) MOTOR: Motor driver initialized[0m
+[0;32mI (1516) LINE: Line sensors initialized (GPIO14/FR39/15/23)[0m
+[0;32mI (1516) ODO: Odometry initialized (L=GPIO2, R=GPIO36, FIN=GPIO34)[0m
+[1;31mE (1526) IMU: ICM-20948 nie znaleziony (WHO_AM_I != 0xEA pod 0x68/0x69)[0m
+[0;33mW (1526) MAIN: IMU nie wykryty – kontynuuję bez IMU[0m
+[0;32mI (1536) PYRO: MLX90614 OK – ambient=29.8 C[0m
+[0;32mI (1536) INA219: INA219 OK pod adresem 0x40 (bocznik=0.050 Ohm)[0m
+[1;31mE (1546) SHT40: SHT40 nie wykryty (sprawdz adres 0x44 i magistrale I2C)[0m
+[0;33mW (1546) MAIN: SHT40 nie wykryty – kontynuuję bez temp/wilgotnosci[0m
+[0;32mI (1566) wifi:wifi driver task: 3ffc2a44, prio:23, stack:6656, core=0[0m
+[0;32mI (1586) wifi:wifi firmware version: b37c951[0m
+[0;32mI (1586) wifi:wifi certification version: v7.0[0m
+[0;32mI (1586) wifi:config NVS flash: enabled[0m
+[0;32mI (1586) wifi:config nano formatting: disabled[0m
+[0;32mI (1596) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (1596) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (1606) wifi:Init management short buffer num: 32[0m
+[0;32mI (1606) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (1606) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (1616) wifi:Init static rx buffer num: 10[0m
+[0;32mI (1616) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (1626) wifi_init: rx ba win: 6[0m
+[0;32mI (1626) wifi_init: accept mbox: 6[0m
+[0;32mI (1626) wifi_init: tcpip mbox: 32[0m
+[0;32mI (1626) wifi_init: udp mbox: 6[0m
+[0;32mI (1636) wifi_init: tcp mbox: 6[0m
+[0;32mI (1636) wifi_init: tcp tx win: 5760[0m
+[0;32mI (1636) wifi_init: tcp rx win: 5760[0m
+[0;32mI (1646) wifi_init: tcp mss: 1440[0m
+[0;32mI (1646) wifi_init: WiFi IRAM OP enabled[0m
+[0;32mI (1646) wifi_init: WiFi RX IRAM OP enabled[0m
+[0;32mI (1656) phy_init: phy_version 4863,a3a4459,Oct 28 2025,14:30:06[0m
+[0;32mI (1726) phy_init: Saving new calibration data due to checksum failure or outdated calibration data, mode(0)[0m
+[0;32mI (1816) wifi:mode : sta (1c:c3:ab:c4:30:f8)[0m
+[0;32mI (1816) wifi:enable tsf[0m
+[0;32mI (1826) WIFI: Laczenie z WiFi: Test2[0m
+[0;32mI (1836) wifi:new:<11,0>, old:<1,0>, ap:<255,255>, sta:<11,0>, prof:1, snd_ch_cfg:0x0[0m
+[0;32mI (1836) wifi:state: init -> auth (0xb0)[0m
+[0;32mI (1856) wifi:state: auth -> assoc (0x0)[0m
+[0;32mI (1866) wifi:state: assoc -> run (0x10)[0m
+[0;32mI (1886) wifi:connected with Test2, aid = 2, channel 11, BW20, bssid = ba:88:b4:b9:e6:09[0m
+[0;32mI (1886) wifi:security: WPA2-PSK, phy: bgn, rssi: -37, cipher(pairwise:0x3, group:0x3), pmf:0[0m
+[0;32mI (1896) wifi:pm start, type: 1[0m
+
+[0;32mI (1896) wifi:dp: 1, bi: 102400, li: 3, scale listen interval from 307200 us to 307200 us[0m
+[0;32mI (1926) wifi:<ba-add>idx:0 (ifx:0, ba:88:b4:b9:e6:09), tid:0, ssn:4, winSize:64[0m
+[0;32mI (1936) wifi:dp: 2, bi: 102400, li: 4, scale listen interval from 307200 us to 409600 us[0m
+[0;32mI (1936) wifi:AP's beacon interval = 102400 us, DTIM period = 2[0m
+[0;32mI (2926) esp_netif_handlers: sta ip: 10.232.162.118, mask: 255.255.255.0, gw: 10.232.162.143[0m
+[0;32mI (2926) WIFI: IP: 10.232.162.118[0m
+[0;32mI (2926) WIFI: Polaczono! Otwórz: http://10.232.162.118[0m
+[0;32mI (2936) HTTP: HTTP server uruchomiony na porcie 80[0m
+[0;32mI (2936) MAIN: System gotowy. Dashboard: http://<IP_ESP32>/[0m

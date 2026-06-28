@@ -9,6 +9,10 @@ idf_component_register(SRCS
     "led_control.c"
     "wifi_manager.c"
     "http_server.c"
+    "ina219.c"
+    "sht40.c"
+    "buzzer.c"
+    "web_monitor.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_wifi

@@ -11,5 +11,7 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Projects\\autonomous_vehicle\\build"
-  ]
+  ],
+  "idf.flashType": "UART",
+  "idf.portWin": "COM3"
 }
