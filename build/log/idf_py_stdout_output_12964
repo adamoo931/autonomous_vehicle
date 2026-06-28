@@ -1,0 +1,13 @@
+Command: ninja app
+[1/6] Building C object esp-idf/main/CMakeFiles/__idf_main.dir/lidar.c.obj
+[2/6] Linking C static library esp-idf\main\libmain.a
+[3/6] Generating esp-idf/esp_system/ld/sections.ld
+[4/6] Linking CXX executable autonomous_vehicle.elf
+[5/6] Generating binary image from built executable
+esptool v5.3.0
+Creating ESP32 image...
+Merged 3 ELF sections.
+Successfully created ESP32 image.
+Generated C:/Projects/autonomous_vehicle/build/autonomous_vehicle.bin
+[6/6] C:\Windows\system32\cmd.exe /C "cd /D C:\Projects\autonomous_vehicle\build && C:\Espressif\tools\python\v6.0.1\venv\Scripts\python.exe C:/esp/v6.0.1/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app C:/Projects/autonomous_vehicle/build/partition_table/partition-table.bin C:/Projects/autonomous_vehicle/build/autonomous_vehicle.bin"
+autonomous_vehicle.bin binary size 0xd8ba0 bytes. Smallest app partition is 0x100000 bytes. 0x27460 bytes (15%) free.
