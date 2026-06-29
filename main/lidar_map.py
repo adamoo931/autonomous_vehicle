@@ -8,6 +8,9 @@ przez endpoint HTTP  GET /api/lidar/scan?since=N  i na bieżąco buduje mapę
 przeszkód na wykresie punktowym.
 
 Zasada mapowania (zgodnie z wymaganiem):
+  • Pokazywane są TYLKO BIEŻĄCE przeszkody – każdy odczyt zastępuje poprzedni
+    (najnowszy ~1 obrót lidaru). Dzięki temu obracający się/jadący robot NIE
+    tworzy już skumulowanego miszmaszu – widać to, co lidar widzi teraz.
   • Przestrzeń jest dzielona na kwadratową siatkę o boku CELL (domyślnie 5 cm).
   • Każda zajęta komórka 5×5 cm = JEDNA czarna kropka na mapie.
   • Dzięki temu sześcian 5×5 cm to 1 kropka, a przedmiot 5×30 cm to 6 kropek
@@ -17,10 +20,9 @@ Zasada mapowania (zgodnie z wymaganiem):
 
 Obsługa:
   • Wpisz adres IP robota (ten sam, pod którym działa dashboard), kliknij START.
-  • Mapa akumuluje się w czasie – najlepiej skanować nieruchomym robotem
-    (lub obracającym się w miejscu), żeby zweryfikować, czy ściany/przeszkody
-    rysują się poprawnie.
-  • RESET czyści wszystkie zeskanowane przeszkody.
+  • Mapa pokazuje wyłącznie aktualny skan i odświeża się na bieżąco – idealne
+    do weryfikacji, czy ściany/przeszkody rysują się poprawnie pod aktualnym
+    położeniem i orientacją robota.
   • Suwaki/pola pozwalają dobrać rozmiar komórki, zasięg i orientację (offset kąta).
 
 Wymagania:  Python 3.8+,  matplotlib,  numpy   (tkinter jest w standardzie).
@@ -71,24 +73,22 @@ class LidarClient:
         self.angle_offset_deg = 0.0
         self.invert_dir = False
 
-        # Stan mapy.
-        self.grid = set()            # zbiór zajętych komórek (ix, iy)
-        self.last_scan = []          # ostatni „świeży” skan [(x_mm, y_mm), ...]
-        self.seq = 0                 # kursor sekwencyjny (tylko nowe punkty)
+        # Stan mapy (TYLKO bieżący skan – bez akumulacji).
+        self.cells = set()           # komórki zajęte w AKTUALNYM skanie (ix, iy)
+        self.last_scan = []          # surowe punkty aktualnego skanu [(x_mm, y_mm), ...]
+        self.seq = 0                 # ostatni numer sekwencyjny (do statusu)
         self.rpm = 0
         self.connected = False
         self.last_error = ""
-
-        # Statystyki tempa.
-        self._pts_window = []        # znaczniki czasu dodanych punktów
-        self.points_per_s = 0.0
+        self.n_points = 0            # liczba punktów w bieżącym skanie
+        self.pps = 0.0                # punktów/s (tempo napływu danych z lidaru)
+        self._last_ingest_t = None    # do liczenia pps (czas poprzedniego _ingest)
 
     # ── sterowanie wątkiem ──────────────────────────────────────────
     def start(self):
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
-        self.seq = 0                 # zaczynamy od najnowszych dostępnych punktów
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -98,11 +98,12 @@ class LidarClient:
             self.connected = False
 
     def reset_map(self):
+        # W trybie bieżącym mapa i tak odświeża się sama; RESET po prostu
+        # natychmiast czyści widok do następnego skanu.
         with self._lock:
-            self.grid.clear()
+            self.cells = set()
             self.last_scan = []
-            self._pts_window.clear()
-            self.points_per_s = 0.0
+            self.n_points = 0
 
     # ── aktualizacja konfiguracji (z GUI) ───────────────────────────
     def configure(self, **kw):
@@ -114,9 +115,9 @@ class LidarClient:
     def snapshot(self):
         with self._lock:
             cell = self.cell_mm
-            # Środki zajętych komórek [m].
-            if self.grid:
-                arr = np.array(list(self.grid), dtype=np.float64)
+            # Środki zajętych komórek BIEŻĄCEGO skanu [m].
+            if self.cells:
+                arr = np.array(list(self.cells), dtype=np.float64)
                 grid_xy = (arr + 0.5) * cell / 1000.0
             else:
                 grid_xy = np.empty((0, 2))
@@ -127,8 +128,9 @@ class LidarClient:
                 "live": live,
                 "rpm": self.rpm,
                 "connected": self.connected,
-                "n_cells": len(self.grid),
-                "pps": self.points_per_s,
+                "n_cells": len(self.cells),
+                "n_points": self.n_points,
+                "pps": self.pps,
                 "error": self.last_error,
             }
 
@@ -139,8 +141,9 @@ class LidarClient:
             try:
                 with self._lock:
                     host = self.host
-                    since = self.seq
-                url = f"http://{host}/api/lidar/scan?since={since}"
+                # since=0 => firmware zwraca NAJNOWSZE ~512 punktów (≈1 obrót),
+                # czyli zawsze aktualny pełny skan – bez akumulacji historii.
+                url = f"http://{host}/api/lidar/scan?since=0"
                 with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_S) as r:
                     data = json.loads(r.read().decode("utf-8"))
                 self._ingest(data)
@@ -157,7 +160,7 @@ class LidarClient:
             if dt < POLL_INTERVAL_S:
                 self._stop.wait(POLL_INTERVAL_S - dt)
 
-    # ── przetworzenie odpowiedzi i wpis do siatki ───────────────────
+    # ── przetworzenie odpowiedzi: TYLKO bieżący skan ────────────────
     def _ingest(self, data):
         pts = data.get("pts", [])
         seq = int(data.get("seq", 0))
@@ -171,8 +174,7 @@ class LidarClient:
             min_r = self.min_range_mm
 
             fresh = []
-            now = time.time()
-            added = 0
+            cells = set()
             # pts to spłaszczona tablica: [a0, d0, a1, d1, ...]
             for i in range(0, len(pts) - 1, 2):
                 ang_h = pts[i]
@@ -183,29 +185,30 @@ class LidarClient:
                 x = dist * math.cos(theta)
                 y = dist * math.sin(theta)
                 fresh.append((x, y))
-                ix = math.floor(x / cell)
-                iy = math.floor(y / cell)
-                if (ix, iy) not in self.grid:
-                    self.grid.add((ix, iy))
-                added += 1
+                cells.add((math.floor(x / cell), math.floor(y / cell)))
 
+            # ZASTĘPUJEMY (nie akumulujemy) – pokazujemy tylko to, co teraz.
             self.last_scan = fresh
+            self.cells = cells
+            self.n_points = len(fresh)
             self.seq = seq
             self.rpm = rpm
 
-            # Tempo punktów (okno 2 s).
-            self._pts_window.append((now, added))
-            cutoff = now - 2.0
-            self._pts_window = [(t, c) for (t, c) in self._pts_window if t >= cutoff]
-            total = sum(c for _, c in self._pts_window)
-            span = max(0.5, now - self._pts_window[0][0]) if self._pts_window else 1.0
-            self.points_per_s = total / span
+            # Tempo napływu danych [pkt/s] – wygładzone (EMA), żeby liczba
+            # w statusie nie skakała przy każdym odczycie.
+            now_t = time.time()
+            if self._last_ingest_t is not None:
+                dt = now_t - self._last_ingest_t
+                if dt > 0:
+                    inst_pps = len(fresh) / dt
+                    self.pps = 0.7 * self.pps + 0.3 * inst_pps
+            self._last_ingest_t = now_t
 
-    # ── eksport siatki do CSV (środki komórek, metry) ───────────────
+    # ── eksport BIEŻĄCEGO skanu do CSV (środki komórek, metry) ──────
     def export_csv(self, path):
         with self._lock:
             cell = self.cell_mm
-            cells = list(self.grid)
+            cells = list(self.cells)
         with open(path, "w", encoding="utf-8") as f:
             f.write("x_m,y_m\n")
             for ix, iy in cells:
@@ -280,17 +283,17 @@ class App:
         self.ax.grid(True, color="#e0e0e0", linewidth=0.5)
         self.ax.set_xlabel("X [m]  (przód robota →)")
         self.ax.set_ylabel("Y [m]  (← lewo)")
-        self.ax.set_title("Mapa przeszkód (każda kropka = zajęta komórka siatki)")
+        self.ax.set_title("Bieżące przeszkody (każda kropka = zajęta komórka 5 cm)")
 
         r = DEFAULT_MAX_RANGE
         self.ax.set_xlim(-r, r)
         self.ax.set_ylim(-r, r)
 
-        # Warstwy: mapa skumulowana (czarne) + bieżący skan (niebieskie).
+        # Warstwy: bieżące przeszkody (czarne komórki) + surowy skan (niebieskie).
         self.grid_sc = self.ax.scatter([], [], s=10, c="black", marker="o",
-                                       label="przeszkody (mapa)")
+                                       label="przeszkody 5 cm (teraz)")
         self.live_sc = self.ax.scatter([], [], s=6, c="#3a86ff", alpha=0.45,
-                                       label="bieżący skan")
+                                       label="surowy skan")
         # Robot w środku układu + strzałka kierunku.
         self.ax.plot(0, 0, marker="^", color="#e63946", markersize=12, zorder=5)
         self.ax.annotate("", xy=(0.5, 0), xytext=(0, 0),

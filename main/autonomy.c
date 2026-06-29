@@ -46,10 +46,14 @@ static const char *TAG = "AUTO";
 #define KICK_POWER       90      // moc impulsu rozruchowego [%]
 #define KICK_MS         220      // czas trwania impulsu [ms]
 
-// ── Progi odległości lidaru [mm] ────────────────────────────
-#define D_BLOCK         350      // przeszkoda z przodu bliżej => omijaj
-#define D_CLEAR         480      // przód uznaj za wolny dopiero powyżej (histereza)
-#define D_OPEN_MM      4000      // „brak echa” interpretuj jako tak daleko
+// ── Progi nawigacji „jedź w najbardziej otwartą przestrzeń" [mm] ──
+// FRONT_GO: ile MINIMUM wolnej przestrzeni musi być z przodu, by jechać
+//   prosto. Poniżej tego pojazd obraca się ku najbardziej otwartemu
+//   kierunkowi DOOKOŁA (także do tyłu!) – nie pcha się na bliską ścianę.
+#define FRONT_GO        600      // [mm] próg jazdy do przodu
+#define FRONT_GO_HYST   120      // [mm] histereza wyjścia z obrotu (anty-drganie)
+#define D_OPEN_MM      4000      // „brak echa" interpretuj jako tak daleko (otwarte)
+#define STEER_DIV       100      // dzielnik łagodnej korekty toru (mniejszy=mocniej)
 
 // ── Łuki pomiarowe (kąty WZGLĘDEM przodu robota) ────────────
 //    0° = przód, +90° = lewo, -90° = prawo, 180° = tył
@@ -61,7 +65,7 @@ static const char *TAG = "AUTO";
 
 // ── Czasy manewrów [ms] ─────────────────────────────────────
 #define T_TURN_MIN      250      // min. czas obrotu omijającego (anty-oscylacja)
-#define T_AVOID_MAX    4500      // brak wyjazdu w tym czasie => ślepy zaułek
+#define T_AVOID_MAX    6000      // brak otwarcia w tym czasie => ucieczka (np. pełny obrót)
 #define T_BACK          700      // czas cofania
 #define T_BLIND        700       // ślepy obrót po cofnięciu (~90°)
 #define T_BLIND_LONG   1300      // dłuższy obrót (ślepy zaułek)
@@ -108,10 +112,9 @@ static TaskHandle_t  s_task    = NULL;
 static uint32_t s_state_t      = 0;   // ms wejścia w bieżący stan
 static uint32_t s_progress_t   = 0;   // ms ostatniego postępu (odometria)
 static uint32_t s_last_pulses  = 0;
-static int      s_dir          = +1;  // kierunek obrotu omijającego (+1=lewo)
-static int      s_blind_dir    = -1;  // kierunek ślepego obrotu
+static int      s_dir          = +1;  // kierunek obrotu ku otwartej przestrzeni (+1=lewo)
+static int      s_blind_dir    = -1;  // kierunek ślepego obrotu (ucieczka)
 static uint32_t s_blind_ms     = T_BLIND;
-static int      s_alt          = +1;  // alternujący kierunek dla ucieczek
 static int      s_target_hits  = 0;
 static int      s_escape_count = 0;
 static bool     s_stopped      = false;
@@ -172,7 +175,7 @@ static void reset_progress(void) {
 // ma sensu zapychać bufora powtarzającymi się próbkami).
 static void record_sample(uint32_t now, uint16_t front_raw,
                            int diag_l, int diag_r, int side_l, int side_r,
-                           pyrometer_data_t pd) {
+                           int best_open_deg, pyrometer_data_t pd) {
     if (s_state == ST_FAULT) return;
     if (s_log_n >= AUTO_LOG_MAX) {
         if (!s_log_full_warned) {
@@ -183,23 +186,46 @@ static void record_sample(uint32_t now, uint16_t front_raw,
         return;
     }
     autonomy_log_rec_t *r = &s_log[s_log_n++];
-    r->t_ms         = now - s_run_t0;
-    r->front_mm     = (int16_t)open_mm(front_raw);
-    r->diag_l_mm    = (int16_t)diag_l;
-    r->diag_r_mm    = (int16_t)diag_r;
-    r->side_l_mm    = (int16_t)side_l;
-    r->side_r_mm    = (int16_t)side_r;
-    r->motor_l      = (int8_t)motor_get_left_speed();
-    r->motor_r      = (int8_t)motor_get_right_speed();
-    r->obj_temp_x10 = (int16_t)(pd.object_temp  * 10.0f);
-    r->amb_temp_x10 = (int16_t)(pd.ambient_temp * 10.0f);
-    r->state        = (uint8_t)s_state;
+    r->t_ms          = now - s_run_t0;
+    r->front_mm      = (int16_t)open_mm(front_raw);
+    r->diag_l_mm     = (int16_t)diag_l;
+    r->diag_r_mm     = (int16_t)diag_r;
+    r->side_l_mm     = (int16_t)side_l;
+    r->side_r_mm     = (int16_t)side_r;
+    r->motor_l       = (int8_t)motor_get_left_speed();
+    r->motor_r       = (int8_t)motor_get_right_speed();
+    r->obj_temp_x10  = (int16_t)(pd.object_temp  * 10.0f);
+    r->amb_temp_x10  = (int16_t)(pd.ambient_temp * 10.0f);
+    r->best_open_deg = (int16_t)best_open_deg;
+    r->state         = (uint8_t)s_state;
 }
 
-// Rozpocznij sekwencję ucieczki: cofnij, potem ślepy obrót.
-// long_turn=true dla ślepego zaułka / krawędzi z obu stron.
-static void begin_escape(int dir, bool long_turn) {
-    s_blind_dir = dir;
+// Skanuje 12 kierunków DOOKOŁA robota (co 30°) i zwraca kierunek obrotu
+// (+1 = w lewo, -1 = w prawo) ku NAJBARDZIEJ otwartemu z nich. Dzięki
+// uwzględnieniu tyłu (120°..180°..-120°) robot potrafi ZAWRÓCIĆ, gdy cała
+// wolna przestrzeń jest za nim. W *best_angle_out (jeśli != NULL) trafia
+// kąt najbardziej otwartego sektora (do logu).
+static int seek_open_dir(int *best_angle_out) {
+    static const int ang[12]  = {0, 30, 60, 90, 120, 150, 180, -150, -120, -90, -60, -30};
+    static const int half[12] = {FRONT_HALF, 16, 16, 16, 16, 16, 18, 16, 16, 16, 16, 16};
+    int best_i = 0, best_cl = -1;
+    for (int i = 0; i < 12; i++) {
+        int cl = open_mm(arc(ang[i], half[i]));
+        if (cl > best_cl) { best_cl = cl; best_i = i; }
+    }
+    if (best_angle_out) *best_angle_out = ang[best_i];
+    if (ang[best_i] == 0) return +1;                 // już z przodu (kierunek nieistotny)
+    if (ang[best_i] == 180) {                          // dokładnie z tyłu – wybierz wg stron
+        int l = open_mm(arc(90, 25)), r = open_mm(arc(-90, 25));
+        return (l >= r) ? +1 : -1;
+    }
+    return (ang[best_i] > 0) ? +1 : -1;                // dodatni kąt => w lewo
+}
+
+// Rozpocznij sekwencję ucieczki: cofnij, potem ślepy obrót ku otwartej
+// stronie. long_turn=true dla ślepego zaułka (dłuższy obrót).
+static void begin_escape(bool long_turn) {
+    s_blind_dir = seek_open_dir(NULL);
     s_blind_ms  = long_turn ? T_BLIND_LONG : T_BLIND;
     s_escape_count++;
     if (s_escape_count > ESCAPE_LIMIT) {
@@ -210,7 +236,8 @@ static void begin_escape(int dir, bool long_turn) {
         enter(ST_FAULT);
     } else {
         motor_stop();
-        ESP_LOGW(TAG, "Ucieczka #%d (dir=%d, long=%d)", s_escape_count, dir, long_turn);
+        ESP_LOGW(TAG, "Ucieczka #%d (cofnij + obrot w %s, long=%d)",
+                 s_escape_count, s_blind_dir > 0 ? "LEWO" : "PRAWO", long_turn);
         enter(ST_BACK);
     }
 }
@@ -236,9 +263,9 @@ static void autonomy_task(void *arg) {
         odometry_data_t od = odometry_get();
         uint32_t pulses = od.pulses_left + od.pulses_right;
 
-        // Łuki lidaru – liczone raz na cykl, używane w kilku miejscach
-        // i w logu statusu (front_raw zostaje "surowy" – 0 = brak echa,
-        // potrzebne do progów D_BLOCK/D_CLEAR; reszta po open_mm()).
+        // Łuki lidaru – liczone raz na cykl, używane w decyzjach i logu
+        // (front_raw zostaje "surowy" – 0 = brak echa, potrzebne do progu
+        // FRONT_GO; pozostałe po open_mm() => 0 zamieniane na D_OPEN_MM).
         uint16_t front_raw = arc(0, FRONT_HALF);
         int diag_l = open_mm(arc(+DIAG_CENTER, DIAG_HALF));
         int diag_r = open_mm(arc(-DIAG_CENTER, DIAG_HALF));
@@ -248,15 +275,18 @@ static void autonomy_task(void *arg) {
         // --- szczegółowy log statusu (konsola) + rekord do pliku CSV ---
         if (now - s_log_t >= STATUS_LOG_MS) {
             s_log_t = now;
+            int best_open = 0;
+            seek_open_dir(&best_open);   // kąt najbardziej otwartego kierunku DOOKOŁA
             ESP_LOGI(TAG,
                 "[%s] silniki L=%d%% R=%d%% | lidar mm: przod=%d diag_L=%d diag_R=%d bok_L=%d bok_R=%d | "
-                "termo: obiekt=%.1fC otoczenie=%.1fC delta=%.1fC (potw=%d/%d) | impulsy=%lu bez_ruchu=%lums",
+                "najwiecej_miejsca=%d st | termo: obiekt=%.1fC otoczenie=%.1fC delta=%.1fC (potw=%d/%d) | "
+                "impulsy=%lu bez_ruchu=%lums",
                 autonomy_state_str(), motor_get_left_speed(), motor_get_right_speed(),
-                open_mm(front_raw), diag_l, diag_r, side_l, side_r,
+                open_mm(front_raw), diag_l, diag_r, side_l, side_r, best_open,
                 pd.object_temp, pd.ambient_temp, pd.object_temp - pd.ambient_temp,
                 s_target_hits, TARGET_CONFIRM,
                 (unsigned long)pulses, (unsigned long)(now - s_progress_t));
-            record_sample(now, front_raw, diag_l, diag_r, side_l, side_r, pd);
+            record_sample(now, front_raw, diag_l, diag_r, side_l, side_r, best_open, pd);
         }
 
         // =========================================================
@@ -307,35 +337,42 @@ static void autonomy_task(void *arg) {
                 s_progress_t  = now;
             } else if (now - s_progress_t > STUCK_MS) {
                 ESP_LOGW(TAG, "Brak postepu (utkniecie) – ucieczka.");
-                begin_escape(s_alt, false);
-                s_alt = -s_alt;
+                begin_escape(false);
                 break;
             }
 
-            // b) przeszkoda z przodu? -> obróć w stronę bardziej otwartą
-            if (front_raw != 0 && front_raw < D_BLOCK) {
-                s_dir = (side_l >= side_r) ? +1 : -1;   // +1=lewo, -1=prawo
+            // b) za mało miejsca z przodu? -> obróć się ku NAJBARDZIEJ OTWARTEMU
+            //    kierunkowi DOOKOŁA (także do tyłu – jeśli wolna przestrzeń jest
+            //    za pojazdem, zawróci). To jest „jedź tam, gdzie najwięcej miejsca".
+            if (front_raw != 0 && front_raw < FRONT_GO) {
+                int best = 0;
+                s_dir = seek_open_dir(&best);
                 led_set_yellow(true);
-                ESP_LOGI(TAG, "Przeszkoda z przodu (%u mm) – omijam w %s (bok_L=%d bok_R=%d mm)",
-                         front_raw, s_dir > 0 ? "LEWO" : "PRAWO", side_l, side_r);
+                ESP_LOGI(TAG, "Ciasno z przodu (%u mm) – obracam ku otwartej przestrzeni "
+                              "(%s, najlepszy sektor %d st.)",
+                         front_raw, s_dir > 0 ? "LEWO" : "PRAWO", best);
                 enter(ST_AVOID);
                 break;
             }
 
-            // c) jazda do przodu: impuls rozruchowy + delikatne centrowanie
+            // c) jazda do przodu: impuls rozruchowy, a po nim łagodny skręt ku
+            //    bardziej otwartej STRONIE (żeby celować w przestrzeń, nie w róg)
             if (now - s_state_t < KICK_MS) {
-                // przełamanie tarcia – oba koła pełną mocą prosto
                 motor_set_left(KICK_POWER);
                 motor_set_right(KICK_POWER);
             } else {
-                int k = (diag_r - diag_l) / 60;       // prawo bardziej otwarte => skręć w prawo
-                if (k >  SP_STEER_MAX) k =  SP_STEER_MAX;
-                if (k < -SP_STEER_MAX) k = -SP_STEER_MAX;
+                int lo = open_mm(arc(+45, 22)), ll = open_mm(arc(+90, 25));
+                int ro = open_mm(arc(-45, 22)), rr = open_mm(arc(-90, 25));
+                int left_open  = lo > ll ? lo : ll;
+                int right_open = ro > rr ? ro : rr;
+                int bias = (left_open - right_open) / STEER_DIV;   // >0 => skręć w lewo
+                if (bias >  SP_STEER_MAX) bias =  SP_STEER_MAX;
+                if (bias < -SP_STEER_MAX) bias = -SP_STEER_MAX;
                 // korektę realizujemy DODAJĄC kołu zewnętrznemu – żadne koło
                 // nie spada poniżej SP_CRUISE (inaczej słabsze koło staje)
                 int l = SP_CRUISE, r = SP_CRUISE;
-                if (k > 0) l += k;                    // skręt w prawo: dołóż lewemu
-                else       r += -k;                   // skręt w lewo: dołóż prawemu
+                if (bias > 0) r += bias;      // skręt w lewo: przyspiesz prawe (zewnętrzne)
+                else          l += -bias;     // skręt w prawo: przyspiesz lewe
                 motor_set_left(l);
                 motor_set_right(r);
             }
@@ -351,19 +388,17 @@ static void autonomy_task(void *arg) {
             s_last_pulses = pulses;
             s_progress_t  = now;
 
-            int dmin = diag_l < diag_r ? diag_l : diag_r;
-            bool clear = (front_raw == 0 || front_raw > D_CLEAR) && dmin > D_BLOCK;
-
-            if (clear && (now - s_state_t) >= T_TURN_MIN) {
-                s_escape_count = 0;                 // czyste ominięcie = zdrowo
-                ESP_LOGI(TAG, "Tor wolny – wracam do jazdy (przod=%d diag_min=%d mm)",
-                         open_mm(front_raw), dmin);
+            // wyjście dopiero gdy z przodu jest NAPRAWDĘ otwarcie (histereza,
+            // żeby nie przeskakiwać tam i z powrotem na granicy progu)
+            bool open_ahead = (front_raw == 0) || (front_raw >= FRONT_GO + FRONT_GO_HYST);
+            if (open_ahead && (now - s_state_t) >= T_TURN_MIN) {
+                s_escape_count = 0;                 // znaleziona otwarta przestrzeń = zdrowo
+                ESP_LOGI(TAG, "Przod otwarty (%d mm) – jade w te strone.", open_mm(front_raw));
                 reset_progress();
                 enter(ST_CRUISE);
             } else if (now - s_state_t > T_AVOID_MAX) {
-                ESP_LOGW(TAG, "Nie moge ominac (slepy zaulek) – ucieczka.");
-                begin_escape(s_alt, true);
-                s_alt = -s_alt;
+                ESP_LOGW(TAG, "Po pelnym obrocie brak otwarcia – ucieczka (cofniecie).");
+                begin_escape(true);
             }
             break;
         }
@@ -412,7 +447,6 @@ void autonomy_set_enabled(bool enable) {
     if (enable) {
         s_target_hits  = 0;
         s_escape_count = 0;
-        s_alt          = +1;
         led_set_red(false);
         reset_progress();
         enter(ST_CRUISE);

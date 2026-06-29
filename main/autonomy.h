@@ -63,6 +63,7 @@ typedef struct {
     int8_t   motor_r;
     int16_t  obj_temp_x10;
     int16_t  amb_temp_x10;
+    int16_t  best_open_deg; // kąt najbardziej otwartego kierunku DOOKOŁA [st], + = lewo
     uint8_t  state;         // wartość enum stanu – użyj autonomy_log_state_name()
 } autonomy_log_rec_t;
 

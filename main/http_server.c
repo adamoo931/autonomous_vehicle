@@ -592,7 +592,7 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
     static const char *header =
         "czas_ms,stan,silnik_L_proc,silnik_R_proc,"
         "lidar_przod_mm,lidar_diag_L_mm,lidar_diag_R_mm,lidar_bok_L_mm,lidar_bok_R_mm,"
-        "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
+        "najwiecej_miejsca_st,temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
     httpd_resp_send_chunk(req, header, strlen(header));
 
     char buf[256];
@@ -603,11 +603,11 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         float obj = r.obj_temp_x10 / 10.0f;
         float amb = r.amb_temp_x10 / 10.0f;
         int len = snprintf(buf, sizeof(buf),
-            "%lu,%s,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            "%lu,%s,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
             (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
             r.motor_l, r.motor_r,
             r.front_mm, r.diag_l_mm, r.diag_r_mm, r.side_l_mm, r.side_r_mm,
-            obj, amb, obj - amb);
+            r.best_open_deg, obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
     }
     httpd_resp_send_chunk(req, NULL, 0);   // zakończ odpowiedź chunked
