@@ -16,6 +16,7 @@
 #include "sht40.h"
 #include "buzzer.h"
 #include "lidar.h"
+#include "autonomy.h"
 #include "wifi_manager.h"
 #include "http_server.h"
 #include "web_monitor.h"
@@ -156,6 +157,9 @@ void app_main(void) {
     // ── Sieć ──
     wifi_init_sta();
     http_server_start();
+
+    // ── Autonomia (sterowana z dashboardu: „Symuluj autonomię") ──
+    autonomy_init();
 
     // ── Sygnał gotowości ──
     led_set_green(true);

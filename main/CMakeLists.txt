@@ -2,6 +2,7 @@ idf_component_register(SRCS
     "main.c"
     "motor_driver.c"
     "lidar.c"
+    "autonomy.c"
     "line_sensor.c"
     "odometry.c"
     "imu.c"

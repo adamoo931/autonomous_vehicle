@@ -8,6 +8,7 @@
 #include "sht40.h"
 #include "buzzer.h"
 #include "lidar.h"
+#include "autonomy.h"
 #include "line_sensor.h"
 #include "web_monitor.h"
 #include "esp_http_server.h"
@@ -152,6 +153,17 @@ static const char DASHBOARD_HTML[] =
     "</div>\n"
     "\n"
     "<div class=\"card\" style=\"margin-bottom:8px\">\n"
+    "  <h2>&#129302; Autonomia</h2>\n"
+    "  <div style=\"display:flex;gap:12px;align-items:center;flex-wrap:wrap\">\n"
+    "    <button id=\"auto-btn\" onclick=\"autoToggle()\" style=\"font-size:1.05em;padding:12px 20px\">&#9654; Symuluj autonomi&#281;</button>\n"
+    "    <span>Stan: <span class=\"val\" id=\"auto-state\">-</span></span>\n"
+    "    <a id=\"auto-log-link\" href=\"/api/autonomy/log.csv\" style=\"padding:10px 16px;border:1px solid #30363d;border-radius:6px;text-decoration:none;color:#c9d1d9;background:#21262d\">&#128190; Pobierz log przejazdu (CSV)</a>\n"
+    "    <span style=\"font-size:0.85em;color:#8b949e\">wierszy w logu: <span class=\"val\" id=\"auto-logcount\">0</span></span>\n"
+    "  </div>\n"
+    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Pojazd jedzie wolno, omija przeszkody wykryte lidarem, a zatrzymuje si&#281; po dojechaniu do obiektu o ok. 50&#176;C cieplejszego ni&#380; otoczenie (gor&#261;cy czajnik). Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
+    "</div>\n"
+    "\n"
+    "<div class=\"card\" style=\"margin-bottom:8px\">\n"
     "  <h2>&#128421;&#65039; Monitor (logi UART / ESP_LOG)</h2>\n"
     "  <div style=\"display:flex;gap:10px;align-items:center;margin-bottom:6px;flex-wrap:wrap\">\n"
     "    <button onclick=\"clearLogs()\">&#128465;&#65039; Wyczy&#347;&#263;</button>\n"
@@ -247,6 +259,7 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('m-l').textContent=d.motors.left;\n"
     "      document.getElementById('m-r').textContent=d.motors.right;\n"
     "    }\n"
+    "    if(d.autonomy){updateAuto(d.autonomy.enabled,d.autonomy.state,d.autonomy.log_count);}\n"
     "  }).catch(function(){\n"
     "    document.getElementById('status-bar').innerHTML='<span class=\"err\">&#128997; Brak polaczenia</span>';\n"
     "  });\n"
@@ -254,6 +267,27 @@ static const char DASHBOARD_HTML[] =
     "\n"
     "function beep(){fetch('/api/buzzer',{method:'POST'});}\n"
     "function buzz(f,d){fetch('/api/buzzer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq:f,duration_ms:d})});}\n"
+    "\n"
+    "var autoOn=false;\n"
+    "function updateAuto(en,st,logCount){\n"
+    "  autoOn=en;\n"
+    "  var b=document.getElementById('auto-btn');\n"
+    "  b.innerHTML=en?'&#9209; Zatrzymaj autonomi\\u0119':'&#9654; Symuluj autonomi\\u0119';\n"
+    "  b.style.background=en?'#3d1212':'#21262d';\n"
+    "  b.style.borderColor=en?'#f85149':'#30363d';\n"
+    "  b.style.color=en?'#f85149':'#c9d1d9';\n"
+    "  document.getElementById('auto-state').textContent=st;\n"
+    "  if(typeof logCount!=='undefined'){\n"
+    "    document.getElementById('auto-logcount').textContent=logCount;\n"
+    "  }\n"
+    "}\n"
+    "function autoToggle(){\n"
+    "  fetch('/api/autonomy',{method:'POST',headers:{'Content-Type':'application/json'},\n"
+    "    body:JSON.stringify({enable:!autoOn})})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){updateAuto(d.enabled,d.state);})\n"
+    "    .catch(function(){});\n"
+    "}\n"
     "\n"
     "function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}\n"
     "function colorize(t){\n"
@@ -385,6 +419,13 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(motors, "right", motor_get_right_speed());
     cJSON_AddItemToObject(root, "motors", motors);
 
+    // Autonomia
+    cJSON *autoj = cJSON_CreateObject();
+    cJSON_AddBoolToObject(autoj, "enabled", autonomy_is_enabled());
+    cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
+    cJSON_AddNumberToObject(autoj, "log_count", autonomy_log_count());
+    cJSON_AddItemToObject(root, "autonomy", autoj);
+
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
@@ -397,6 +438,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
 
 // ── POST /api/motor  {"left": -100..100, "right": -100..100} ─
 static esp_err_t handle_motor(httpd_req_t *req) {
+    autonomy_set_enabled(false);   // ręczne sterowanie = wyłącz autonomię (kill-switch)
     char buf[128];
     if (read_body(req, buf, sizeof(buf)) < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
@@ -416,6 +458,7 @@ static esp_err_t handle_motor(httpd_req_t *req) {
 
 // ── POST /api/motor/stop ─────────────────────────────────────
 static esp_err_t handle_motor_stop(httpd_req_t *req) {
+    autonomy_set_enabled(false);   // STOP wyłącza też autonomię
     motor_stop();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
@@ -536,6 +579,71 @@ static esp_err_t handle_lidar_scan(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ── GET /api/autonomy/log.csv ────────────────────────────────
+// Pobiera log ostatniego/bieżącego przejazdu (bufor RAM, zerowany przy
+// starcie KAŻDEGO przejazdu – pobierz zaraz po jeździe, zanim wystartuje
+// następna). Strumieniowane w kawałkach (chunked), żeby nie wymagać
+// dużego bufora na stosie/heapie nawet przy ~2000 wierszach.
+static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/csv; charset=utf-8");
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                        "attachment; filename=\"przejazd_log.csv\"");
+
+    static const char *header =
+        "czas_ms,stan,silnik_L_proc,silnik_R_proc,"
+        "lidar_przod_mm,lidar_diag_L_mm,lidar_diag_R_mm,lidar_bok_L_mm,lidar_bok_R_mm,"
+        "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
+    httpd_resp_send_chunk(req, header, strlen(header));
+
+    char buf[256];
+    uint32_t n = autonomy_log_count();
+    for (uint32_t i = 0; i < n; i++) {
+        autonomy_log_rec_t r;
+        if (!autonomy_log_get(i, &r)) break;
+        float obj = r.obj_temp_x10 / 10.0f;
+        float amb = r.amb_temp_x10 / 10.0f;
+        int len = snprintf(buf, sizeof(buf),
+            "%lu,%s,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
+            r.motor_l, r.motor_r,
+            r.front_mm, r.diag_l_mm, r.diag_r_mm, r.side_l_mm, r.side_r_mm,
+            obj, amb, obj - amb);
+        httpd_resp_send_chunk(req, buf, len);
+    }
+    httpd_resp_send_chunk(req, NULL, 0);   // zakończ odpowiedź chunked
+    return ESP_OK;
+}
+
+// ── POST /api/autonomy  {"enable":true/false}  (też akceptuje "run") ──
+// Przycisk „Symuluj autonomię" w dashboardzie. Bez ciała = przełącz.
+static esp_err_t handle_autonomy(httpd_req_t *req) {
+    bool target = !autonomy_is_enabled();   // domyślnie: przełącz
+    if (req->content_len > 0) {
+        char buf[128];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *e = cJSON_GetObjectItem(j, "enable");
+                if (!e) e = cJSON_GetObjectItem(j, "run");
+                if (e) target = cJSON_IsTrue(e) ||
+                                (cJSON_IsNumber(e) && e->valuedouble != 0);
+                cJSON_Delete(j);
+            }
+        }
+    }
+    autonomy_set_enabled(target);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "enabled", autonomy_is_enabled());
+    cJSON_AddStringToObject(root, "state", autonomy_state_str());
+    char *s = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, s);
+    free(s);
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
@@ -558,6 +666,8 @@ esp_err_t http_server_start(void) {
         { .uri="/api/logs",           .method=HTTP_GET,  .handler=handle_logs       },
         { .uri="/api/logs/clear",     .method=HTTP_POST, .handler=handle_logs_clear },
         { .uri="/api/buzzer",         .method=HTTP_POST, .handler=handle_buzzer     },
+        { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
+        { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
     };
 
     int n_routes = sizeof(routes) / sizeof(routes[0]);

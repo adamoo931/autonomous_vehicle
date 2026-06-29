@@ -69,3 +69,14 @@ uint16_t lidar_copy_scan(uint32_t since, lidar_scan_point_t *out,
 
 /** Prędkość obrotowa głowicy z ostatniego pakietu [RPM]. */
 uint16_t lidar_get_speed_rpm(void);
+
+/**
+ * Minimalna odległość [mm] w łuku [center-half .. center+half] stopni
+ * (kąt w SUROWYM układzie lidaru, 0..359, z zawijaniem przez 0/360).
+ * Pomija kierunki bez echa oraz odczyty starsze niż LIDAR_BIN_MAX_AGE_MS.
+ * Zwraca 0, gdy w całym łuku nie ma świeżego echa (kierunek otwarty).
+ *
+ * Używane przez moduł autonomii (autonomy.c) do wykrywania przeszkód
+ * w wybranych łukach wokół robota (przód, przekątne, boki).
+ */
+uint16_t lidar_min_in_arc(int center_deg, int half_deg);

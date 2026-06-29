@@ -1,3 +1,0 @@
-Command: ninja app
-[1/1] C:\Windows\system32\cmd.exe /C "cd /D C:\Projects\autonomous_vehicle\build && C:\Espressif\tools\python\v6.0.1\venv\Scripts\python.exe C:/esp/v6.0.1/esp-idf/components/partition_table/check_sizes.py --offset 0x8000 partition --type app C:/Projects/autonomous_vehicle/build/partition_table/partition-table.bin C:/Projects/autonomous_vehicle/build/autonomous_vehicle.bin"
-autonomous_vehicle.bin binary size 0xd89e0 bytes. Smallest app partition is 0x100000 bytes. 0x27620 bytes (15%) free.

@@ -28,6 +28,13 @@ static lidar_scan_point_t s_buf[LIDAR_SCAN_BUFFER];
 static uint32_t           s_seq     = 0;     // łączna liczba dodanych punktów
 static SemaphoreHandle_t  s_buf_mtx = NULL;  // ochrona bufora producent/konsument
 
+// ── Mapa kątowa 360° (po jednej najświeższej odległości na stopień) ──
+// Wykorzystywana przez moduł autonomii do oceny przeszkód w łukach
+// (przód/boki). Chroniona tym samym muteksem co bufor skanu.
+#define LIDAR_BIN_MAX_AGE_MS 500     // starsze odczyty traktuj jako "brak echa"
+static uint16_t   s_polar[360]   = {0};
+static TickType_t s_polar_t[360] = {0};
+
 // Dodaje punkt do bufora kołowego (wołane tylko z lidar_task,
 // pod muteksem). Punkt otrzymuje numer sekwencyjny s_seq+1.
 static inline void buf_push(uint16_t angle, uint16_t dist) {
@@ -115,10 +122,17 @@ static void lidar_task(void *arg) {
 
             // Do mapy trafiają tylko pakiety z poprawnym CRC – brak śmieci.
             if (crc_ok && s_buf_mtx) {
+                TickType_t now = xTaskGetTickCount();
                 xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
-                for (int i = 0; i < 12; i++)
-                    buf_push(pkt.points[i].angle_hundredths,
-                             pkt.points[i].distance_mm);
+                for (int i = 0; i < 12; i++) {
+                    uint16_t d = pkt.points[i].distance_mm;
+                    buf_push(pkt.points[i].angle_hundredths, d);
+                    if (d == 0) continue;                      // brak echa
+                    int deg = (pkt.points[i].angle_hundredths / 100) % 360;
+                    if (deg < 0) deg += 360;
+                    s_polar[deg]   = d;
+                    s_polar_t[deg] = now;
+                }
                 xSemaphoreGive(s_buf_mtx);
             }
         }
@@ -177,6 +191,27 @@ uint16_t lidar_get_min_distance_mm(void) {
 
 uint16_t lidar_get_speed_rpm(void) { return s_last.speed_rpm; }
 
+uint16_t lidar_min_in_arc(int center_deg, int half_deg) {
+    if (!s_buf_mtx) return 0;
+    if (half_deg < 0)   half_deg = 0;
+    if (half_deg > 180) half_deg = 180;
+
+    TickType_t now     = xTaskGetTickCount();
+    TickType_t max_age = pdMS_TO_TICKS(LIDAR_BIN_MAX_AGE_MS);
+    uint16_t   mn      = 0;   // 0 = brak świeżego echa w całym łuku (kierunek otwarty)
+
+    xSemaphoreTake(s_buf_mtx, portMAX_DELAY);
+    for (int k = -half_deg; k <= half_deg; k++) {
+        int idx = ((center_deg + k) % 360 + 360) % 360;
+        uint16_t v = s_polar[idx];
+        if (v == 0) continue;                          // brak echa w tym kierunku
+        if ((now - s_polar_t[idx]) > max_age) continue; // dane przeterminowane
+        if (mn == 0 || v < mn) mn = v;
+    }
+    xSemaphoreGive(s_buf_mtx);
+    return mn;
+}
+
 uint16_t lidar_copy_scan(uint32_t since, lidar_scan_point_t *out,
                          uint16_t max_pts, uint32_t *out_seq) {
     if (!out || max_pts == 0 || !s_buf_mtx) {
@@ -210,6 +245,9 @@ void lidar_stop(void) { }
 lidar_packet_t lidar_get_last_packet(void) { lidar_packet_t p = {0}; return p; }
 uint16_t lidar_get_min_distance_mm(void)   { return 0; }
 uint16_t lidar_get_speed_rpm(void)         { return 0; }
+uint16_t lidar_min_in_arc(int center_deg, int half_deg) {
+    (void)center_deg; (void)half_deg; return 0;
+}
 uint16_t lidar_copy_scan(uint32_t since, lidar_scan_point_t *out,
                          uint16_t max_pts, uint32_t *out_seq) {
     (void)since; (void)out; (void)max_pts;
