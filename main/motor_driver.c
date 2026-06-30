@@ -3,9 +3,11 @@
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
-#include <stdlib.h>  // abs()
+#include <stdlib.h>   /* abs() */
 
 static const char *TAG = "MOTOR";
+
+/* Buforowana prędkość każdego silnika (-100..100). */
 static int s_left  = 0;
 static int s_right = 0;
 
@@ -13,6 +15,8 @@ static inline int clamp(int v, int lo, int hi) {
     return v < lo ? lo : v > hi ? hi : v;
 }
 
+/* Przeliczenie prędkości w procentach na wypełnienie PWM (10-bit) i zapis
+ * do kanału LEDC. Bierze wartość bezwzględną - kierunek ustawiają piny GPIO. */
 static void set_duty(ledc_channel_t ch, int pct) {
     uint32_t duty = (uint32_t)((abs(pct) * 1023UL) / 100UL);
     ledc_set_duty(LEDC_MODE, ch, duty);
@@ -20,7 +24,7 @@ static void set_duty(ledc_channel_t ch, int pct) {
 }
 
 void motor_init(void) {
-    // ── Piny kierunkowe ──
+    /* Piny kierunkowe obu mostków. */
     gpio_config_t dir = {
         .pin_bit_mask = (1ULL << PIN_AIN1) | (1ULL << PIN_AIN2) |
                         (1ULL << PIN_BIN1) | (1ULL << PIN_BIN2),
@@ -31,7 +35,7 @@ void motor_init(void) {
     };
     gpio_config(&dir);
 
-    // ── Timer LEDC ──
+    /* Wspólny timer LEDC dla obu kanałów PWM. */
     ledc_timer_config_t tmr = {
         .speed_mode      = LEDC_MODE,
         .timer_num       = LEDC_TIMER,
@@ -41,7 +45,7 @@ void motor_init(void) {
     };
     ledc_timer_config(&tmr);
 
-    // ── Kanał lewy (A) ──
+    /* Kanał lewy (A). */
     ledc_channel_config_t chA = {
         .channel    = LEDC_CHANNEL_LEFT,
         .duty       = 0,
@@ -52,7 +56,7 @@ void motor_init(void) {
     };
     ledc_channel_config(&chA);
 
-    // ── Kanał prawy (B) ──
+    /* Kanał prawy (B). */
     ledc_channel_config_t chB = {
         .channel    = LEDC_CHANNEL_RIGHT,
         .duty       = 0,
@@ -64,13 +68,14 @@ void motor_init(void) {
     ledc_channel_config(&chB);
 
     motor_stop();
-    ESP_LOGI(TAG, "Motor driver initialized");
+    ESP_LOGI(TAG, "Sterownik silnikow zainicjalizowany");
 }
 
 void motor_set_left(int speed) {
     speed   = clamp(speed, -100, 100);
     s_left  = speed;
 
+    /* Dodatnia prędkość = przód, ujemna = wstecz, zero = wybieg. */
     if (speed > 0) {
         gpio_set_level(PIN_AIN1, 1);
         gpio_set_level(PIN_AIN2, 0);
@@ -101,6 +106,7 @@ void motor_set_right(int speed) {
     set_duty(LEDC_CHANNEL_RIGHT, speed);
 }
 
+/* Skręty realizowane różnicowo: koło wewnętrzne na połowie prędkości. */
 void motor_forward(uint8_t speed)  { motor_set_left( speed); motor_set_right( speed); }
 void motor_backward(uint8_t speed) { motor_set_left(-speed); motor_set_right(-speed); }
 void motor_turn_left(uint8_t speed)  { motor_set_left(-(speed/2)); motor_set_right( speed); }

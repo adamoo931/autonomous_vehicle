@@ -18,8 +18,8 @@ end
 
 # Load bootloader symbols
 set confirm off
-    add-symbol-file C:/Projects/autonomous_vehicle/build/bootloader/bootloader.elf
+    add-symbol-file C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader/bootloader.elf
 set confirm on
 
 # Load application symbols
-file C:/Projects/autonomous_vehicle/build/autonomous_vehicle.elf
+file C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/autonomous_vehicle.elf

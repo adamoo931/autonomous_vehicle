@@ -1,4 +1,4 @@
-"-specs=C:/Projects/autonomous_vehicle/build/bootloader/specs/picolibc.specs"
+"-specs=C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader/specs/picolibc.specs"
 -Wno-frame-address
 -mlongcalls
 -fno-builtin-memcpy

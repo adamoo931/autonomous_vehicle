@@ -3,4 +3,4 @@
 -fno-builtin-memcpy
 -fno-builtin-memset
 -fno-builtin-bzero
-"-specs=C:/Projects/autonomous_vehicle/build/specs/picolibc.specs"
+"-specs=C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/specs/picolibc.specs"

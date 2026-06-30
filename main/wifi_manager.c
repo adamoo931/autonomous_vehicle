@@ -8,15 +8,19 @@
 #include <string.h>
 
 static const char *TAG = "WIFI";
+
 static EventGroupHandle_t s_wifi_eg;
 static bool               s_connected = false;
 static char               s_ip[20]    = "0.0.0.0";
+
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 #define MAX_RETRY          10
 
 static int s_retry = 0;
 
+/* Obsługa zdarzeń WiFi/IP: ponawia łączenie do MAX_RETRY prób, a po
+ * uzyskaniu adresu IP zapisuje go i ustawia bit powodzenia. */
 static void event_handler(void *arg, esp_event_base_t base,
                            int32_t id, void *data)
 {
@@ -68,14 +72,16 @@ void wifi_init_sta(void) {
 
     ESP_LOGI(TAG, "Laczenie z WiFi: %s", WIFI_SSID);
 
+    /* Blokada do pierwszego z bitów: połączono albo wyczerpano próby
+     * (z górnym limitem czasu 15 s). */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_eg,
         WIFI_CONNECTED_BIT | WIFI_FAIL_BIT, pdFALSE, pdFALSE,
         pdMS_TO_TICKS(15000));
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Polaczono! Otwórz: http://%s", s_ip);
+        ESP_LOGI(TAG, "Polaczono! Otworz: http://%s", s_ip);
     } else {
-        ESP_LOGE(TAG, "Blad WiFi – sprawdz SSID/haslo");
+        ESP_LOGE(TAG, "Blad WiFi - sprawdz SSID/haslo");
     }
 }
 

@@ -1,4 +1,4 @@
-# Install script for directory: C:/Projects/autonomous_vehicle/components/espressif__cjson
+# Install script for directory: C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/managed_components/espressif__cjson
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
@@ -40,6 +40,6 @@ endif()
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Projects/autonomous_vehicle/build/esp-idf/espressif__cjson/install_local_manifest.txt"
+  file(WRITE "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/esp-idf/espressif__cjson/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()

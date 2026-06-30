@@ -21,7 +21,7 @@
 static const char *TAG = "HTTP";
 static httpd_handle_t s_server = NULL;
 
-// ── Embedded HTML dashboard ──────────────────────────────────
+/* Wbudowany dashboard HTML (strona sterująca serwowana pod GET /). */
 static const char DASHBOARD_HTML[] =
     "<!DOCTYPE html>\n"
     "<html lang=\"pl\">\n"
@@ -316,7 +316,7 @@ static const char DASHBOARD_HTML[] =
     "</body>\n"
     "</html>\n";
 
-// ── Pomocnicza: odczytaj body żądania POST ───────────────────
+/* Pomocnicza: odczyt ciała żądania POST do bufora. */
 static int read_body(httpd_req_t *req, char *buf, size_t maxlen) {
     int total = req->content_len;
     if (total <= 0 || total >= (int)maxlen) return -1;
@@ -330,18 +330,18 @@ static int read_body(httpd_req_t *req, char *buf, size_t maxlen) {
     return received;
 }
 
-// ── GET / ────────────────────────────────────────────────────
+/* GET / - strona dashboardu. */
 static esp_err_t handle_root(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, DASHBOARD_HTML, sizeof(DASHBOARD_HTML) - 1);
     return ESP_OK;
 }
 
-// ── GET /api/sensors ─────────────────────────────────────────
+/* GET /api/sensors - zbiorczy odczyt wszystkich czujników jako JSON. */
 static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
 
-    // LIDAR
+    /* LIDAR */
     lidar_packet_t lpkt = lidar_get_last_packet();
     cJSON *lidar = cJSON_CreateObject();
     cJSON_AddNumberToObject(lidar, "min_distance_mm", lidar_get_min_distance_mm());
@@ -351,7 +351,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(lidar, "valid", lpkt.valid);
     cJSON_AddItemToObject(root, "lidar", lidar);
 
-    // Pirometr
+    /* Pirometr */
     pyrometer_data_t pd = pyrometer_get_last();
     cJSON *pyro = cJSON_CreateObject();
     cJSON_AddNumberToObject(pyro, "object_temp",  (double)pd.object_temp);
@@ -360,7 +360,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(pyro, "initialized",     pd.initialized);
     cJSON_AddItemToObject(root, "pyrometer", pyro);
 
-    // IMU
+    /* IMU */
     imu_data_t id = imu_get_last();
     cJSON *imu = cJSON_CreateObject();
     cJSON_AddNumberToObject(imu, "accel_x", (double)id.accel_x);
@@ -373,7 +373,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(imu, "initialized", id.initialized);
     cJSON_AddItemToObject(root, "imu", imu);
 
-    // INA219 (prad/napiecie)
+    /* INA219 (prąd/napięcie) */
     ina219_data_t in = ina219_get_last();
     cJSON *ina = cJSON_CreateObject();
     cJSON_AddNumberToObject(ina, "bus_voltage_v",    (double)in.bus_voltage_v);
@@ -384,7 +384,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(ina, "initialized",        in.initialized);
     cJSON_AddItemToObject(root, "ina219", ina);
 
-    // SHT40 (temperatura/wilgotnosc)
+    /* SHT40 (temperatura/wilgotność) */
     sht40_data_t sh = sht40_get_last();
     cJSON *sht = cJSON_CreateObject();
     cJSON_AddNumberToObject(sht, "temperature_c", (double)sh.temperature_c);
@@ -393,7 +393,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(sht, "initialized",     sh.initialized);
     cJSON_AddItemToObject(root, "sht40", sht);
 
-    // Odometria
+    /* Odometria */
     odometry_data_t od = odometry_get();
     cJSON *odo = cJSON_CreateObject();
     cJSON_AddNumberToObject(odo, "pulses_left",    od.pulses_left);
@@ -404,7 +404,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(odo, "finish_detected",  od.finish_detected);
     cJSON_AddItemToObject(root, "odometry", odo);
 
-    // Czujniki linii
+    /* Czujniki linii */
     line_sensor_data_t ls = line_sensor_read();
     cJSON *line = cJSON_CreateObject();
     cJSON_AddBoolToObject(line, "front_left",  ls.front_left);
@@ -413,13 +413,13 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(line, "back_right",  ls.back_right);
     cJSON_AddItemToObject(root, "line_sensors", line);
 
-    // Silniki
+    /* Silniki */
     cJSON *motors = cJSON_CreateObject();
     cJSON_AddNumberToObject(motors, "left",  motor_get_left_speed());
     cJSON_AddNumberToObject(motors, "right", motor_get_right_speed());
     cJSON_AddItemToObject(root, "motors", motors);
 
-    // Autonomia
+    /* Autonomia */
     cJSON *autoj = cJSON_CreateObject();
     cJSON_AddBoolToObject(autoj, "enabled", autonomy_is_enabled());
     cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
@@ -436,9 +436,9 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ── POST /api/motor  {"left": -100..100, "right": -100..100} ─
+/* POST /api/motor {"left":-100..100,"right":-100..100} - sterowanie silnikami. */
 static esp_err_t handle_motor(httpd_req_t *req) {
-    autonomy_set_enabled(false);   // ręczne sterowanie = wyłącz autonomię (kill-switch)
+    autonomy_set_enabled(false);   /* ręczne sterowanie wyłącza autonomię (kill-switch) */
     char buf[128];
     if (read_body(req, buf, sizeof(buf)) < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
@@ -456,15 +456,15 @@ static esp_err_t handle_motor(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ── POST /api/motor/stop ─────────────────────────────────────
+/* POST /api/motor/stop - awaryjne zatrzymanie. */
 static esp_err_t handle_motor_stop(httpd_req_t *req) {
-    autonomy_set_enabled(false);   // STOP wyłącza też autonomię
+    autonomy_set_enabled(false);   /* STOP wyłącza także autonomię */
     motor_stop();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
-// ── POST /api/led  {"red":0/1,"yellow":0/1,"green":0/1} ───
+/* POST /api/led {"red":0/1,"yellow":0/1,"green":0/1} - sterowanie diodami. */
 static esp_err_t handle_led(httpd_req_t *req) {
     char buf[128];
     if (read_body(req, buf, sizeof(buf)) < 0) {
@@ -485,14 +485,14 @@ static esp_err_t handle_led(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ── POST /api/odometry/reset ─────────────────────────────────
+/* POST /api/odometry/reset - zerowanie liczników odometrii. */
 static esp_err_t handle_odo_reset(httpd_req_t *req) {
     odometry_reset();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
-// ── GET /api/logs  (monitor szeregowy przez WWW) ─────────────
+/* GET /api/logs - podgląd logów (monitor szeregowy przez WWW). */
 static esp_err_t handle_logs(httpd_req_t *req) {
     size_t cap = 8200;
     char *buf = malloc(cap);
@@ -508,14 +508,14 @@ static esp_err_t handle_logs(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ── POST /api/logs/clear ─────────────────────────────────────
+/* POST /api/logs/clear - czyszczenie bufora logów. */
 static esp_err_t handle_logs_clear(httpd_req_t *req) {
     web_monitor_clear();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
 
-// ── POST /api/buzzer  {opcjonalnie "freq","duration_ms"} ─────
+/* POST /api/buzzer {opcjonalnie "freq","duration_ms"} - sygnał dźwiękowy. */
 static esp_err_t handle_buzzer(httpd_req_t *req) {
     int freq = 2000, dur = 200;
     if (req->content_len > 0) {
@@ -536,12 +536,11 @@ static esp_err_t handle_buzzer(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ── GET /api/lidar/scan?since=N ──────────────────────────────
-// Strumień punktów lidaru do budowy mapy przeszkód.
-// Zwraca kompaktowy JSON: {"seq":S,"rpm":R,"n":K,"pts":[a0,d0,a1,d1,...]}
-//   seq – bieżący licznik sekwencyjny (podaj jako ?since= przy kolejnym żądaniu,
-//         dzięki czemu pobierasz tylko NOWE punkty, bez duplikatów)
-//   pts – spłaszczona tablica par (kąt[setne stopnia], odległość[mm])
+/* GET /api/lidar/scan?since=N - strumień punktów LIDAR do budowy mapy przeszkód.
+ * Zwraca kompaktowy JSON: {"seq":S,"rpm":R,"n":K,"pts":[a0,d0,a1,d1,...]}.
+ *   seq - bieżący licznik sekwencyjny; podaj jako ?since= przy kolejnym żądaniu,
+ *         aby pobierać tylko nowe punkty (bez duplikatów).
+ *   pts - spłaszczona tablica par (kąt [setne stopnia], odległość [mm]). */
 static esp_err_t handle_lidar_scan(httpd_req_t *req) {
     uint32_t since = 0;
     char q[48];
@@ -551,13 +550,14 @@ static esp_err_t handle_lidar_scan(httpd_req_t *req) {
             since = (uint32_t)strtoul(v, NULL, 10);
     }
 
-    // Okno odczytu: najnowsze do 512 punktów na żądanie (~jeden obrót LD06).
+    /* Okno odczytu: najnowsze do 512 punktów na żądanie (~jeden obrót LD06). */
     static lidar_scan_point_t pts[512];
     uint32_t seq = 0;
     uint16_t n = lidar_copy_scan(since, pts, 512, &seq);
 
-    // Ręczny, kompaktowy JSON (cJSON dla setek liczb jest pamięcio/czasożerny).
-    size_t cap = 64 + (size_t)n * 14;   // "65535,65535," ≈ 12 znaków/punkt
+    /* Ręczne budowanie kompaktowego JSON - cJSON dla setek liczb jest kosztowny
+       pamięciowo i czasowo. */
+    size_t cap = 64 + (size_t)n * 14;   /* ok. 12 znaków na punkt: "65535,65535," */
     char *buf = malloc(cap);
     if (!buf) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no mem");
@@ -579,11 +579,10 @@ static esp_err_t handle_lidar_scan(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// ── GET /api/autonomy/log.csv ────────────────────────────────
-// Pobiera log ostatniego/bieżącego przejazdu (bufor RAM, zerowany przy
-// starcie KAŻDEGO przejazdu – pobierz zaraz po jeździe, zanim wystartuje
-// następna). Strumieniowane w kawałkach (chunked), żeby nie wymagać
-// dużego bufora na stosie/heapie nawet przy ~2000 wierszach.
+/* GET /api/autonomy/log.csv - log ostatniego/bieżącego przejazdu (bufor RAM,
+ * zerowany przy starcie każdego przejazdu; pobierz zaraz po jeździe, zanim
+ * ruszy następna). Wysyłane w kawałkach (chunked), aby nie wymagać dużego
+ * bufora nawet przy ~2000 wierszach. */
 static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/csv; charset=utf-8");
     httpd_resp_set_hdr(req, "Content-Disposition",
@@ -610,14 +609,14 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
             r.best_open_deg, obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
     }
-    httpd_resp_send_chunk(req, NULL, 0);   // zakończ odpowiedź chunked
+    httpd_resp_send_chunk(req, NULL, 0);   /* zakończ odpowiedź chunked */
     return ESP_OK;
 }
 
-// ── POST /api/autonomy  {"enable":true/false}  (też akceptuje "run") ──
-// Przycisk „Symuluj autonomię" w dashboardzie. Bez ciała = przełącz.
+/* POST /api/autonomy {"enable":true/false} (akceptuje też "run"). Wywoływane
+ * przyciskiem autonomii w dashboardzie. Brak ciała żądania = przełącz stan. */
 static esp_err_t handle_autonomy(httpd_req_t *req) {
-    bool target = !autonomy_is_enabled();   // domyślnie: przełącz
+    bool target = !autonomy_is_enabled();   /* domyślnie: przełącz */
     if (req->content_len > 0) {
         char buf[128];
         if (read_body(req, buf, sizeof(buf)) > 0) {

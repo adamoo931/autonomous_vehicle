@@ -10,18 +10,18 @@ if(NOT EXISTS "C:/esp/v6.0.1/esp-idf/components/bootloader/subproject")
   file(MAKE_DIRECTORY "C:/esp/v6.0.1/esp-idf/components/bootloader/subproject")
 endif()
 file(MAKE_DIRECTORY
-  "C:/Projects/autonomous_vehicle/build/bootloader"
-  "C:/Projects/autonomous_vehicle/build/bootloader-prefix"
-  "C:/Projects/autonomous_vehicle/build/bootloader-prefix/tmp"
-  "C:/Projects/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp"
-  "C:/Projects/autonomous_vehicle/build/bootloader-prefix/src"
-  "C:/Projects/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp"
+  "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader"
+  "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix"
+  "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/tmp"
+  "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp"
+  "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src"
+  "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp"
 )
 
 set(configSubDirs )
 foreach(subDir IN LISTS configSubDirs)
-    file(MAKE_DIRECTORY "C:/Projects/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/${subDir}")
+    file(MAKE_DIRECTORY "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/${subDir}")
 endforeach()
 if(cfgdir)
-  file(MAKE_DIRECTORY "C:/Projects/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp${cfgdir}") # cfgdir has leading slash
+  file(MAKE_DIRECTORY "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp${cfgdir}") # cfgdir has leading slash
 endif()

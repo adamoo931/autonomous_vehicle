@@ -1,0 +1,8 @@
+# Wymuś końce linii LF dla źródeł (spójność na Windows/Linux/macOS).
+*.c    text eol=lf
+*.h    text eol=lf
+*.py   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.txt  text eol=lf
+CMakeLists.txt text eol=lf

@@ -23,7 +23,9 @@
 
 static const char *TAG = "MAIN";
 
-// ─── Inicjalizacja magistrali I2C ──────────────────────────
+/* Inicjalizacja magistrali I2C w trybie master. Adresy czujników są zaszyte
+ * na stałe w config.h (zweryfikowane na sprzęcie), więc po starcie nie
+ * skanujemy już magistrali w poszukiwaniu urządzeń. */
 static void i2c_init(void) {
     i2c_config_t conf = {
         .mode             = I2C_MODE_MASTER,
@@ -39,37 +41,7 @@ static void i2c_init(void) {
              PIN_I2C_SDA, PIN_I2C_SCL, I2C_FREQ_HZ);
 }
 
-// ─── Skaner I2C – wypisuje wykryte adresy na monitor (web/UART) ─
-static void i2c_scan(void) {
-    ESP_LOGI(TAG, "Skanowanie magistrali I2C...");
-    int found = 0;
-    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
-        i2c_cmd_handle_t h = i2c_cmd_link_create();
-        i2c_master_start(h);
-        i2c_master_write_byte(h, (addr << 1) | I2C_MASTER_WRITE, true);
-        i2c_master_stop(h);
-        esp_err_t ret = i2c_master_cmd_begin(I2C_PORT, h, pdMS_TO_TICKS(30));
-        i2c_cmd_link_delete(h);
-        if (ret == ESP_OK) {
-            const char *name = "?";
-            if (addr == 0x5A) name = "MLX90614 (pirometr)";
-            else if (addr == 0x68 || addr == 0x69) name = "ICM-20948 (IMU)";
-            else if (addr == 0x44) name = "SHT40";
-            else if (addr >= 0x40 && addr <= 0x4F) name = "INA219";
-            ESP_LOGI(TAG, "  -> wykryto 0x%02X  [%s]", addr, name);
-            found++;
-        }
-    }
-    if (found == 0) {
-        ESP_LOGW(TAG, "  Nie wykryto ZADNEGO ukladu I2C! Sprawdz: zasilanie czujnikow, "
-                      "rezystory podciagajace SDA/SCL, oraz piny GPIO%d/GPIO%d.",
-                      PIN_I2C_SDA, PIN_I2C_SCL);
-    } else {
-        ESP_LOGI(TAG, "Skan I2C zakonczony – znaleziono %d ukl.", found);
-    }
-}
-
-// ─── Task: odczyt czujników co 100 ms ──────────────────────
+/* Zadanie cyklicznego odczytu czujników I2C, okres 100 ms. */
 static void sensor_task(void *arg) {
     imu_data_t      imu;
     pyrometer_data_t pyro;
@@ -80,15 +52,15 @@ static void sensor_task(void *arg) {
         imu_read(&imu);
         pyrometer_read(&pyro);
         ina219_read(&ina);
-        // SHT40 (temperatura/wilgotnosc) zmienia sie wolno – co ~1 s
+        /* SHT40 (temperatura/wilgotność) zmienia się wolno - odczyt co ~1 s. */
         if (++slow >= 10) {
             slow = 0;
             sht40_read(NULL);
         }
-        // line_sensor i odometria są nieblokujące – czytane
-        // bezpośrednio z http_server przy każdym żądaniu.
+        /* Czujnik linii i odometria są nieblokujące - czytane bezpośrednio
+         * w http_server przy każdym żądaniu HTTP. */
 
-        // Sygnalizacja statusu diodami
+        /* Sygnalizacja stanu diodami LED. */
         if (pyro.finish_detected) {
             led_set_green(true);
         }
@@ -102,7 +74,7 @@ static void sensor_task(void *arg) {
     }
 }
 
-// ─── Startup sekwencja LED ──────────────────────────────────
+/* Trzykrotne mrugnięcie wszystkimi diodami - sygnał startu systemu. */
 static void led_startup_blink(void) {
     for (int i = 0; i < 3; i++) {
         led_set_all(true, true, true);
@@ -112,64 +84,63 @@ static void led_startup_blink(void) {
     }
 }
 
-// ─── app_main ───────────────────────────────────────────────
 void app_main(void) {
-    // Monitor webowy MUSI byc pierwszy – przechwytuje wszystkie logi
-    // (zamiast martwej konsoli UART, ktora zajmuje LIDAR).
+    /* Monitor webowy musi wystartować pierwszy - przechwytuje wszystkie logi.
+     * Zastępuje konsolę UART, której piny są zajęte przez LIDAR. */
     web_monitor_init();
 
-    ESP_LOGI(TAG, "=== Autonomous Vehicle – Start ===");
+    ESP_LOGI(TAG, "=== Autonomous Vehicle - Start ===");
 
-    // NVS (wymagane przez WiFi)
+    /* NVS - wymagane przez sterownik WiFi. */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         nvs_flash_erase();
         nvs_flash_init();
     }
 
-    // ── Sprzęt ──
+    /* Inicjalizacja sprzętu. */
     led_init();
     led_startup_blink();
     buzzer_init();
 
     i2c_init();
-    i2c_scan();             // pokaze realne adresy na monitorze webowym
     motor_init();
     line_sensor_init();
     odometry_init();
 
-    // ── I2C czujniki ──
+    /* Czujniki na magistrali I2C. Brak czujnika nie przerywa rozruchu -
+     * pojazd pracuje dalej w oparciu o pozostałe dane. */
     if (imu_init() != ESP_OK)
-        ESP_LOGW(TAG, "IMU nie wykryty – kontynuuję bez IMU");
+        ESP_LOGW(TAG, "IMU nie wykryty - kontynuuje bez IMU");
 
     if (pyrometer_init() != ESP_OK)
-        ESP_LOGW(TAG, "Pirometr nie wykryty – kontynuuję bez pirometru");
+        ESP_LOGW(TAG, "Pirometr nie wykryty - kontynuuje bez pirometru");
 
     if (ina219_init() != ESP_OK)
-        ESP_LOGW(TAG, "INA219 nie wykryty – kontynuuję bez pomiaru pradu");
+        ESP_LOGW(TAG, "INA219 nie wykryty - kontynuuje bez pomiaru pradu");
 
     if (sht40_init() != ESP_OK)
-        ESP_LOGW(TAG, "SHT40 nie wykryty – kontynuuję bez temp/wilgotnosci");
+        ESP_LOGW(TAG, "SHT40 nie wykryty - kontynuuje bez temp/wilgotnosci");
 
-    // ── LIDAR (można wyłączyć przez LIDAR_ENABLED 0 w config.h) ──
+    /* LIDAR (można wyłączyć ustawiając LIDAR_ENABLED 0 w config.h). */
     lidar_init();
 
-    // ── Sieć ──
+    /* Sieć WiFi oraz serwer HTTP z dashboardem. */
     wifi_init_sta();
     http_server_start();
 
-    // ── Autonomia (sterowana z dashboardu: „Symuluj autonomię") ──
+    /* Moduł autonomii (uruchamiany z dashboardu przyciskiem autonomii). */
     autonomy_init();
 
-    // ── Sygnał gotowości ──
+    /* Sygnał gotowości systemu. */
     led_set_green(true);
-    buzzer_beep();          // krotki sygnal: system wstal
+    buzzer_beep();
     ESP_LOGI(TAG, "System gotowy. Dashboard: http://<IP_ESP32>/");
 
-    // ── Uruchom taski FreeRTOS ──
+    /* Uruchomienie zadania odczytu czujników, przypięte do rdzenia 1. */
     xTaskCreatePinnedToCore(sensor_task, "sensors", 4096, NULL, 5, NULL, 1);
 
-    // Pętla główna – watchdog
+    /* Pętla główna - lekki nadzór zużycia pamięci sterty. */
     while (1) {
         ESP_LOGD(TAG, "Heap free: %lu B", esp_get_free_heap_size());
         vTaskDelay(pdMS_TO_TICKS(5000));

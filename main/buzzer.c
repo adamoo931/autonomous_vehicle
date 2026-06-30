@@ -9,7 +9,7 @@
 static const char *TAG = "BUZZER";
 
 #define BUZZER_DUTY_RES   LEDC_TIMER_10_BIT
-#define BUZZER_DUTY_50    512   // 50% przy 10-bit
+#define BUZZER_DUTY_50    512   /* wypełnienie 50% przy rozdzielczości 10-bit */
 
 static bool s_ready = false;
 
@@ -18,14 +18,14 @@ void buzzer_init(void) {
         .speed_mode      = LEDC_MODE,
         .timer_num       = BUZZER_LEDC_TIMER,
         .duty_resolution = BUZZER_DUTY_RES,
-        .freq_hz         = 2000,           // wartosc startowa
+        .freq_hz         = 2000,           /* częstotliwość startowa */
         .clk_cfg         = LEDC_AUTO_CLK,
     };
     ledc_timer_config(&tmr);
 
     ledc_channel_config_t ch = {
         .channel    = BUZZER_LEDC_CHANNEL,
-        .duty       = 0,                   // start: cisza
+        .duty       = 0,                   /* start w ciszy */
         .gpio_num   = PIN_BUZZER,
         .speed_mode = LEDC_MODE,
         .hpoint     = 0,
@@ -37,7 +37,7 @@ void buzzer_init(void) {
     ledc_update_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL);
 
     s_ready = true;
-    ESP_LOGI(TAG, "Buzzer initialized (GPIO%d)", PIN_BUZZER);
+    ESP_LOGI(TAG, "Buzzer zainicjalizowany (GPIO%d)", PIN_BUZZER);
 }
 
 void buzzer_off(void) {
@@ -51,14 +51,16 @@ typedef struct {
     uint32_t dur_ms;
 } tone_arg_t;
 
-// Zadanie jednorazowe: gra ton i sam sie usuwa (nie blokuje HTTP).
+/* Zadanie jednorazowe: gra ton przez zadany czas i samo się usuwa.
+ * Dzięki temu odtwarzanie nie blokuje wątku wywołującego (np. HTTP). */
 static void tone_task(void *arg) {
     tone_arg_t a = *(tone_arg_t *)arg;
     free(arg);
 
+    /* Ograniczenia bezpieczeństwa: zakres częstotliwości i czas trwania. */
     if (a.freq < 50)    a.freq = 50;
     if (a.freq > 10000) a.freq = 10000;
-    if (a.dur_ms > 3000) a.dur_ms = 3000;   // limit bezpieczenstwa
+    if (a.dur_ms > 3000) a.dur_ms = 3000;
 
     ledc_set_freq(LEDC_MODE, BUZZER_LEDC_TIMER, a.freq);
     ledc_set_duty(LEDC_MODE, BUZZER_LEDC_CHANNEL, BUZZER_DUTY_50);

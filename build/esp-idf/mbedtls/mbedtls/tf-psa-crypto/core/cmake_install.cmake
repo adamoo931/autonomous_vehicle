@@ -38,16 +38,16 @@ if(NOT DEFINED CMAKE_OBJDUMP)
 endif()
 
 if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE STATIC_LIBRARY FILES "C:/Projects/autonomous_vehicle/build/esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/libtfpsacrypto.a")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE STATIC_LIBRARY FILES "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/libtfpsacrypto.a")
 endif()
 
 if(CMAKE_INSTALL_COMPONENT STREQUAL "Unspecified" OR NOT CMAKE_INSTALL_COMPONENT)
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE STATIC_LIBRARY FILES "C:/Projects/autonomous_vehicle/build/esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/libtfpsacrypto.a")
+  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib" TYPE STATIC_LIBRARY FILES "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/libtfpsacrypto.a")
 endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "C:/Projects/autonomous_vehicle/build/esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/install_local_manifest.txt"
+  file(WRITE "C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/esp-idf/mbedtls/mbedtls/tf-psa-crypto/core/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()

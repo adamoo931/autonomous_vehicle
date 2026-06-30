@@ -34488,7 +34488,7 @@
                     }
                 ],
                 "depends_on": null,
-                "id": "component-config-cjson-C:-Projects-autonomous_vehicle-components-espressif__cjson-Kconfig-1",
+                "id": "component-config-cjson-C:-Users-PC-Desktop-autonomous_vehicle_clean-autonomous_vehicle-managed_components-espressif__cjson-Kconfig-1",
                 "title": "cJSON",
                 "type": "menu"
             },

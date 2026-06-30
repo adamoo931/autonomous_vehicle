@@ -22,4 +22,4 @@ set confirm off
 set confirm on
 
 # Load application symbols
-file C:/Projects/autonomous_vehicle/build/bootloader/bootloader.elf
+file C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader/bootloader.elf

@@ -4,6 +4,8 @@
 #include "esp_log.h"
 
 static const char *TAG = "LED";
+
+/* Buforowany stan diod - zwracany przez funkcje led_get_*(). */
 static bool s_red = false, s_yellow = false, s_green = false;
 
 void led_init(void) {
@@ -18,7 +20,7 @@ void led_init(void) {
     };
     gpio_config(&io);
     led_set_all(false, false, false);
-    ESP_LOGI(TAG, "LED initialized");
+    ESP_LOGI(TAG, "Diody LED zainicjalizowane");
 }
 
 void led_set_red(bool on)    { s_red    = on; gpio_set_level(PIN_RED_LED,    on ? 1 : 0); }

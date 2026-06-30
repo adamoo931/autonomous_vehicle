@@ -5,24 +5,24 @@
 #include <string.h>
 #include <stdarg.h>
 
-// Rozmiar bufora logow (ostatnie ~8 KB tekstu)
+/* Rozmiar bufora logów (ostatnie ~8 KB tekstu). */
 #define LOG_BUF_CAP   8192
 
 static char            s_buf[LOG_BUF_CAP];
-static size_t          s_head  = 0;   // nastepna pozycja zapisu
-static size_t          s_count = 0;   // liczba waznych bajtow (<= CAP)
+static size_t          s_head  = 0;   /* następna pozycja zapisu        */
+static size_t          s_count = 0;   /* liczba ważnych bajtów (<= CAP) */
 static portMUX_TYPE    s_mux   = portMUX_INITIALIZER_UNLOCKED;
 static vprintf_like_t  s_prev_vprintf = NULL;
 
-// Dopisuje pojedynczy bajt do bufora kolowego (pod spinlockiem).
+/* Dopisuje pojedynczy bajt do bufora kołowego (pod spinlockiem). */
 static inline void buf_put(char c) {
     s_buf[s_head] = c;
     s_head = (s_head + 1) % LOG_BUF_CAP;
     if (s_count < LOG_BUF_CAP) s_count++;
 }
 
-// Hook logowania: formatuje, usuwa kody ANSI, zapisuje do bufora,
-// a takze przekazuje dalej (na wypadek gdyby UART jednak dzialal).
+/* Hook logowania: formatuje wiersz, usuwa sekwencje ANSI, zapisuje do bufora
+ * i przekazuje dalej do oryginalnego vprintf (gdyby UART jednak działał). */
 static int monitor_vprintf(const char *fmt, va_list args) {
     char line[256];
     va_list cp;
@@ -35,7 +35,7 @@ static int monitor_vprintf(const char *fmt, va_list args) {
         portENTER_CRITICAL(&s_mux);
         for (int i = 0; i < len; i++) {
             char c = line[i];
-            // Pomin sekwencje ANSI: ESC '[' ... <litera>
+            /* Pomiń sekwencję ANSI: ESC '[' ... <litera>. */
             if (c == '\033') {
                 i++;
                 if (i < len && line[i] == '[') {
@@ -46,15 +46,15 @@ static int monitor_vprintf(const char *fmt, va_list args) {
                         i++;
                     }
                 }
-                continue; // pomin tez znak konczacy
+                continue; /* pomiń też znak kończący sekwencję */
             }
-            if (c == '\r') continue;       // bez CR
+            if (c == '\r') continue;       /* bez CR */
             buf_put(c);
         }
         portEXIT_CRITICAL(&s_mux);
     }
 
-    // Przekaz do oryginalnego vprintf (UART), jesli istnial.
+    /* Przekazanie do oryginalnego vprintf (UART), jeśli istniał. */
     if (s_prev_vprintf) {
         return s_prev_vprintf(fmt, args);
     }
@@ -63,7 +63,7 @@ static int monitor_vprintf(const char *fmt, va_list args) {
 
 void web_monitor_init(void) {
     s_prev_vprintf = esp_log_set_vprintf(monitor_vprintf);
-    ESP_LOGI("WEBMON", "Web monitor aktywny – logi dostepne pod /api/logs");
+    ESP_LOGI("WEBMON", "Web monitor aktywny - logi dostepne pod /api/logs");
 }
 
 size_t web_monitor_dump(char *out, size_t maxlen) {
@@ -72,7 +72,7 @@ size_t web_monitor_dump(char *out, size_t maxlen) {
     size_t count = s_count;
     size_t start = (s_head + LOG_BUF_CAP - s_count) % LOG_BUF_CAP;
     size_t to_copy = (count < maxlen - 1) ? count : maxlen - 1;
-    // Pomijamy najstarsze bajty, jesli bufor wiekszy niz docelowy.
+    /* Pominięcie najstarszych bajtów, jeśli bufor większy niż docelowy. */
     if (count > to_copy) {
         start = (start + (count - to_copy)) % LOG_BUF_CAP;
     }
