@@ -1,13 +1,13 @@
 # Target labels
  bootloader
 # Source files and their labels
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/CMakeFiles/bootloader
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/CMakeFiles/bootloader.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/CMakeFiles/bootloader-complete.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
-C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/CMakeFiles/bootloader
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/CMakeFiles/bootloader.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/CMakeFiles/bootloader-complete.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-build.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-configure.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-download.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-install.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-mkdir.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-patch.rule
+C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/bootloader-prefix/src/bootloader-stamp/bootloader-update.rule

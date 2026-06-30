@@ -93,12 +93,17 @@ void motor_set_right(int speed) {
     speed   = clamp(speed, -100, 100);
     s_right = speed;
 
+    /* Logika kierunku odwrócona względem motor_set_left() celowo - silnik
+     * prawego koła fizycznie kręci się w przeciwną stronę niż lewy przy tej
+     * samej elektrycznej konwencji IN1/IN2 (przewody silnika/BIN1-BIN2 są
+     * podłączone do mostka TB6612 w odwrotnej polaryzacji względem kanału
+     * A). Bez tego dodatnia wartość na prawym kanale kręciła kołem wstecz. */
     if (speed > 0) {
-        gpio_set_level(PIN_BIN1, 1);
-        gpio_set_level(PIN_BIN2, 0);
-    } else if (speed < 0) {
         gpio_set_level(PIN_BIN1, 0);
         gpio_set_level(PIN_BIN2, 1);
+    } else if (speed < 0) {
+        gpio_set_level(PIN_BIN1, 1);
+        gpio_set_level(PIN_BIN2, 0);
     } else {
         gpio_set_level(PIN_BIN1, 0);
         gpio_set_level(PIN_BIN2, 0);

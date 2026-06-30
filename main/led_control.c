@@ -23,9 +23,13 @@ void led_init(void) {
     ESP_LOGI(TAG, "Diody LED zainicjalizowane");
 }
 
-void led_set_red(bool on)    { s_red    = on; gpio_set_level(PIN_RED_LED,    on ? 1 : 0); }
-void led_set_yellow(bool on) { s_yellow = on; gpio_set_level(PIN_YELLOW_LED, on ? 1 : 0); }
-void led_set_green(bool on)  { s_green  = on; gpio_set_level(PIN_GREEN_LED,  on ? 1 : 0); }
+/* Diody są podłączone anodą na stałe do szyny 3,3V, a katodą do GPIO
+ * ("sink"/dolne sterowanie) - zapalają się, gdy GPIO ściąga katodę do
+ * masy (LOW), a gasną przy GPIO=HIGH (brak różnicy potencjałów na
+ * diodzie). Logika jest więc odwrócona względem typowego "GPIO=1 -> świeci". */
+void led_set_red(bool on)    { s_red    = on; gpio_set_level(PIN_RED_LED,    on ? 0 : 1); }
+void led_set_yellow(bool on) { s_yellow = on; gpio_set_level(PIN_YELLOW_LED, on ? 0 : 1); }
+void led_set_green(bool on)  { s_green  = on; gpio_set_level(PIN_GREEN_LED,  on ? 0 : 1); }
 
 void led_set_all(bool red, bool yellow, bool green) {
     led_set_red(red);

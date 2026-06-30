@@ -77,7 +77,14 @@ static const char DASHBOARD_HTML[] =
     "    <h2>&#128208; IMU ICM-20948</h2>\n"
     "    <div>Ax:<span class=\"val\" id=\"ax\">-</span> Ay:<span class=\"val\" id=\"ay\">-</span> Az:<span class=\"val\" id=\"az\">-</span> g</div>\n"
     "    <div>Gx:<span class=\"val\" id=\"gx\">-</span> Gy:<span class=\"val\" id=\"gy\">-</span> Gz:<span class=\"val\" id=\"gz\">-</span> &#176;/s</div>\n"
+    "    <div>Mx:<span class=\"val\" id=\"mx\">-</span> My:<span class=\"val\" id=\"my\">-</span> Mz:<span class=\"val\" id=\"mz\">-</span> &#181;T</div>\n"
+    "    <div>Azymut: <span class=\"val\" id=\"hdg\">-</span>&#176;</div>\n"
     "    <div>T: <span class=\"val\" id=\"imu-t\">-</span> &#176;C</div>\n"
+    "    <div style=\"margin-top:6px;display:flex;gap:6px;flex-wrap:wrap\">\n"
+    "      <button onclick=\"magCalStart()\">&#129517; Kalibruj (obr&#243;t 360&#176;)</button>\n"
+    "      <button onclick=\"magSetNorth()\">&#129517; Ustaw N (obecny kierunek)</button>\n"
+    "    </div>\n"
+    "    <div style=\"font-size:0.8em;color:#8b949e;margin-top:4px\" id=\"mag-cal-status\"></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#9889; INA219 Zasilanie</h2>\n"
@@ -125,7 +132,7 @@ static const char DASHBOARD_HTML[] =
     "    </div>\n"
     "    <div class=\"dpad\">\n"
     "      <div></div>\n"
-    "      <button onclick=\"mv(0,spd())\">&#8679;</button>\n"
+    "      <button onclick=\"mv(spd(),spd())\">&#8679;</button>\n"
     "      <div></div>\n"
     "      <button onclick=\"mv(-spd(),spd())\">&#8678;</button>\n"
     "      <button class=\"stop-btn\" onclick=\"doStop()\">&#9632;</button>\n"
@@ -149,6 +156,8 @@ static const char DASHBOARD_HTML[] =
     "    <button onclick=\"beep()\">&#9658; Test (2 kHz)</button>\n"
     "    <button onclick=\"buzz(1000,300)\">Niski ton</button>\n"
     "    <button onclick=\"buzz(4000,300)\">Wysoki ton</button>\n"
+    "    <button onclick=\"song()\">&#127926; Muzyka</button>\n"
+    "    <button class=\"stop-btn\" onclick=\"buzzerStop()\">&#9632; Stop</button>\n"
     "  </div>\n"
     "</div>\n"
     "\n"
@@ -227,7 +236,17 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('gx').textContent=d.imu.gyro_x.toFixed(1);\n"
     "      document.getElementById('gy').textContent=d.imu.gyro_y.toFixed(1);\n"
     "      document.getElementById('gz').textContent=d.imu.gyro_z.toFixed(1);\n"
+    "      document.getElementById('mx').textContent=d.imu.mag_x.toFixed(1);\n"
+    "      document.getElementById('my').textContent=d.imu.mag_y.toFixed(1);\n"
+    "      document.getElementById('mz').textContent=d.imu.mag_z.toFixed(1);\n"
+    "      document.getElementById('hdg').innerHTML=d.imu.mag_initialized?d.imu.azimuth_deg.toFixed(1):'<span class=\"err\">BRAK</span>';\n"
     "      document.getElementById('imu-t').textContent=d.imu.temp.toFixed(1);\n"
+    "      if(d.imu.mag_cal){\n"
+    "        var mc=d.imu.mag_cal;\n"
+    "        document.getElementById('mag-cal-status').textContent=mc.active\n"
+    "          ? ('Kalibracja: obracaj pojazdem... zostalo '+Math.ceil(mc.remaining_ms/1000)+' s')\n"
+    "          : ('offset=('+mc.offset_x.toFixed(1)+','+mc.offset_y.toFixed(1)+') faza='+mc.phase_deg.toFixed(1)+'\\u00B0');\n"
+    "      }\n"
     "    }\n"
     "    if(d.ina219){\n"
     "      document.getElementById('in-v').textContent=d.ina219.bus_voltage_v.toFixed(2);\n"
@@ -250,10 +269,10 @@ static const char DASHBOARD_HTML[] =
     "    }\n"
     "    if(d.line_sensors){\n"
     "      var ls=d.line_sensors;\n"
-    "      document.getElementById('ls-fl').innerHTML=tag(ls.front_left,'OK','KRAWEDZ');\n"
-    "      document.getElementById('ls-fr').innerHTML=tag(ls.front_right,'OK','KRAWEDZ');\n"
-    "      document.getElementById('ls-bl').innerHTML=tag(ls.back_left,'OK','KRAWEDZ');\n"
-    "      document.getElementById('ls-br').innerHTML=tag(ls.back_right,'OK','KRAWEDZ');\n"
+    "      document.getElementById('ls-fl').innerHTML=tag(ls.front_left,'WYKRYTO','BRAK');\n"
+    "      document.getElementById('ls-fr').innerHTML=tag(ls.front_right,'WYKRYTO','BRAK');\n"
+    "      document.getElementById('ls-bl').innerHTML=tag(ls.back_left,'WYKRYTO','BRAK');\n"
+    "      document.getElementById('ls-br').innerHTML=tag(ls.back_right,'WYKRYTO','BRAK');\n"
     "    }\n"
     "    if(d.motors){\n"
     "      document.getElementById('m-l').textContent=d.motors.left;\n"
@@ -267,6 +286,10 @@ static const char DASHBOARD_HTML[] =
     "\n"
     "function beep(){fetch('/api/buzzer',{method:'POST'});}\n"
     "function buzz(f,d){fetch('/api/buzzer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({freq:f,duration_ms:d})});}\n"
+    "function song(){fetch('/api/buzzer/song',{method:'POST'});}\n"
+    "function buzzerStop(){fetch('/api/buzzer/stop',{method:'POST'});}\n"
+    "function magCalStart(){fetch('/api/imu/mag_cal/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_ms:15000})});}\n"
+    "function magSetNorth(){fetch('/api/imu/mag_cal/set_north',{method:'POST'});}\n"
     "\n"
     "var autoOn=false;\n"
     "function updateAuto(en,st,logCount){\n"
@@ -369,8 +392,23 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(imu, "gyro_x",  (double)id.gyro_x);
     cJSON_AddNumberToObject(imu, "gyro_y",  (double)id.gyro_y);
     cJSON_AddNumberToObject(imu, "gyro_z",  (double)id.gyro_z);
+    cJSON_AddNumberToObject(imu, "mag_x",   (double)id.mag_x);
+    cJSON_AddNumberToObject(imu, "mag_y",   (double)id.mag_y);
+    cJSON_AddNumberToObject(imu, "mag_z",   (double)id.mag_z);
+    cJSON_AddNumberToObject(imu, "azimuth_deg", (double)id.azimuth_deg);
     cJSON_AddNumberToObject(imu, "temp",    (double)id.temp);
     cJSON_AddBoolToObject(imu, "initialized", id.initialized);
+    cJSON_AddBoolToObject(imu, "mag_initialized", id.mag_initialized);
+
+    imu_mag_cal_status_t mcal = imu_mag_get_cal_status();
+    cJSON *mag_cal = cJSON_CreateObject();
+    cJSON_AddBoolToObject(mag_cal,   "active",       mcal.active);
+    cJSON_AddNumberToObject(mag_cal, "remaining_ms", mcal.remaining_ms);
+    cJSON_AddNumberToObject(mag_cal, "offset_x",     (double)mcal.offset_x);
+    cJSON_AddNumberToObject(mag_cal, "offset_y",     (double)mcal.offset_y);
+    cJSON_AddNumberToObject(mag_cal, "phase_deg",    (double)mcal.phase_deg);
+    cJSON_AddItemToObject(imu, "mag_cal", mag_cal);
+
     cJSON_AddItemToObject(root, "imu", imu);
 
     /* INA219 (prąd/napięcie) */
@@ -492,6 +530,33 @@ static esp_err_t handle_odo_reset(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* POST /api/imu/mag_cal/start {opcjonalnie "duration_ms"} - start zbierania
+ * min/max magnetometru (krok 1 kalibracji) - obróć pojazd o pełny obrót. */
+static esp_err_t handle_mag_cal_start(httpd_req_t *req) {
+    int dur = 15000;
+    if (req->content_len > 0) {
+        char buf[64];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *d = cJSON_GetObjectItem(j, "duration_ms");
+                if (cJSON_IsNumber(d)) dur = (int)d->valuedouble;
+                cJSON_Delete(j);
+            }
+        }
+    }
+    imu_mag_calibration_start((uint32_t)dur);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* POST /api/imu/mag_cal/set_north - krok 2 kalibracji: bieżący kierunek = 0°. */
+static esp_err_t handle_mag_cal_set_north(httpd_req_t *req) {
+    imu_mag_set_north();
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 /* GET /api/logs - podgląd logów (monitor szeregowy przez WWW). */
 static esp_err_t handle_logs(httpd_req_t *req) {
     size_t cap = 8200;
@@ -532,6 +597,20 @@ static esp_err_t handle_buzzer(httpd_req_t *req) {
         }
     }
     buzzer_tone((uint32_t)freq, (uint32_t)dur);
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* POST /api/buzzer/song - odtwarza w pętli wbudowany jingle "furgonetki z lodami". */
+static esp_err_t handle_buzzer_song(httpd_req_t *req) {
+    buzzer_play_ice_cream_song();
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+/* POST /api/buzzer/stop - przerywa granie (w tym pętlę melodii). */
+static esp_err_t handle_buzzer_stop(httpd_req_t *req) {
+    buzzer_off();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -646,7 +725,7 @@ static esp_err_t handle_autonomy(httpd_req_t *req) {
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
-    cfg.max_uri_handlers   = 16;
+    cfg.max_uri_handlers   = 20;
     cfg.stack_size         = 8192;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -662,9 +741,13 @@ esp_err_t http_server_start(void) {
         { .uri="/api/motor/stop",     .method=HTTP_POST, .handler=handle_motor_stop },
         { .uri="/api/led",            .method=HTTP_POST, .handler=handle_led        },
         { .uri="/api/odometry/reset", .method=HTTP_POST, .handler=handle_odo_reset  },
+        { .uri="/api/imu/mag_cal/start",     .method=HTTP_POST, .handler=handle_mag_cal_start     },
+        { .uri="/api/imu/mag_cal/set_north", .method=HTTP_POST, .handler=handle_mag_cal_set_north },
         { .uri="/api/logs",           .method=HTTP_GET,  .handler=handle_logs       },
         { .uri="/api/logs/clear",     .method=HTTP_POST, .handler=handle_logs_clear },
         { .uri="/api/buzzer",         .method=HTTP_POST, .handler=handle_buzzer     },
+        { .uri="/api/buzzer/song",    .method=HTTP_POST, .handler=handle_buzzer_song },
+        { .uri="/api/buzzer/stop",    .method=HTTP_POST, .handler=handle_buzzer_stop },
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
     };

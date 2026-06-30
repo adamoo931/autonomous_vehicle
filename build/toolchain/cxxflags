@@ -3,5 +3,5 @@
 -fno-builtin-memcpy
 -fno-builtin-memset
 -fno-builtin-bzero
-"-specs=C:/Users/PC/Desktop/autonomous_vehicle_clean/autonomous_vehicle/build/specs/picolibc.specs"
+"-specs=C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/specs/picolibc.specs"
 -fno-rtti
