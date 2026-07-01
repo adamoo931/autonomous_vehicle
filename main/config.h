@@ -124,3 +124,8 @@
  *  Próg detekcji mety przez pirometr (temperatura obiektu)
  * ============================================================ */
 #define PYROMETER_FINISH_THRESHOLD_C  30.0f
+
+/* Próg wykrycia obiektu cieplnego w trybie szukania (różnica temperatury
+ * obiekt - otoczenie), aktywowanym po wykryciu mety Hallem - patrz
+ * pyrometer_start_search() w sensors/pyrometer.c. */
+#define PYROMETER_HOT_DELTA_C          4.0f

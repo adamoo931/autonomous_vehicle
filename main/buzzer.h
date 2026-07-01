@@ -37,5 +37,12 @@ void buzzer_play_melody(const buzzer_note_t *notes, size_t count,
                          bool loop, uint32_t loop_gap_ms);
 
 /* Wbudowany jingle "furgonetki z lodami" (melodia "Turkey in the Straw",
- * domena publiczna). */
+ * domena publiczna) - w nieskończonej pętli (przycisk "Muzyka" na dashboardzie). */
 void buzzer_play_ice_cream_song(void);
+
+/* Ten sam jingle, ale odtworzony tylko raz (np. sygnał wykrycia mety). */
+void buzzer_play_ice_cream_song_once(void);
+
+/* Gama C-dur w górę, odtworzona raz - sygnał wykrycia obiektu cieplnego
+ * (różny od jinglu mety, żeby oba zdarzenia rozróżnić po dźwięku). */
+void buzzer_play_scale_once(void);

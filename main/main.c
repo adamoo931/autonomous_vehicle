@@ -47,6 +47,8 @@ static void sensor_task(void *arg) {
     pyrometer_data_t pyro;
     ina219_data_t   ina;
     int slow = 0;
+    bool was_finish = false;   /* poprzedni stan czujnika Halla mety - do wykrycia zbocza */
+    bool was_hot    = false;   /* poprzedni stan wykrycia obiektu cieplnego - do wykrycia zbocza */
 
     while (1) {
         imu_read(&imu);
@@ -60,15 +62,34 @@ static void sensor_task(void *arg) {
         /* Czujnik linii i odometria są nieblokujące - czytane bezpośrednio
          * w http_server przy każdym żądaniu HTTP. */
 
-        /* Sygnalizacja stanu diodami LED. */
-        if (pyro.finish_detected) {
-            led_set_green(true);
+        /* Sygnalizacja stanu diodami LED: czerwona = autonomia nieaktywna,
+         * zielona = autonomia aktywna (świeci cały czas, dopóki trwa).
+         * Żółta na razie nieobsługiwana. */
+        bool auto_on = autonomy_is_enabled();
+        led_set_green(auto_on);
+        led_set_red(!auto_on);
+
+        /* Meta (czujnik Halla, GPIO34): zbocze "niewykryto -> wykryto"
+         * odgrywa jingle raz, nie w pętli, i uruchamia tryb szukania obiektu
+         * cieplnego pirometrem. Sam odczyt/aktualizacja pola na dashboardzie
+         * dzieje się już w http_server przy każdym /api/sensors. */
+        bool is_finish = odometry_get().finish_detected;
+        if (is_finish && !was_finish) {
+            buzzer_play_ice_cream_song_once();
+            pyrometer_start_search();
         }
-        if (line_sensor_any_edge()) {
-            led_set_yellow(true);
-        } else {
-            led_set_yellow(false);
+        was_finish = is_finish;
+
+        /* Obiekt cieplny (różnica temperatury obiekt-otoczenie >= progu, w
+         * trybie szukania): zbocze "niewykryto -> wykryto" odgrywa gamę raz
+         * i zatrzymuje silniki (motor_stop() jest bezpieczne wywołać nawet
+         * gdy już stały - po prostu nic wtedy nie zmienia). */
+        bool is_hot = pyro.hot_detected;
+        if (is_hot && !was_hot) {
+            buzzer_play_scale_once();
+            motor_stop();
         }
+        was_hot = is_hot;
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -132,8 +153,11 @@ void app_main(void) {
     /* Moduł autonomii (uruchamiany z dashboardu przyciskiem autonomii). */
     autonomy_init();
 
-    /* Sygnał gotowości systemu. */
-    led_set_green(true);
+    /* Sygnał gotowości systemu. Autonomia startuje wyłączona, więc dioda
+     * czerwona (patrz sensor_task) - stan ten i tak zostanie ustawiony przy
+     * pierwszym przebiegu sensor_task, ale robimy to też tutaj, żeby uniknąć
+     * chwili bez żadnej zapalonej diody między startem a uruchomieniem zadania. */
+    led_set_red(true);
     buzzer_beep();
     ESP_LOGI(TAG, "System gotowy. Dashboard: http://<IP_ESP32>/");
 

@@ -57,8 +57,26 @@ esp_err_t pyrometer_read(pyrometer_data_t *out) {
     s_last.ambient_temp    = raw_to_celsius(ta);
     s_last.object_temp     = raw_to_celsius(tobj);
     s_last.finish_detected = (s_last.object_temp >= PYROMETER_FINISH_THRESHOLD_C);
+
+    /* Tryb szukania: raz wykryty obiekt cieplny zostaje wykryty (latch) -
+     * nie znika, gdyby robot odjechał i różnica temperatury spadła. */
+    if (s_last.searching && !s_last.hot_detected &&
+        (s_last.object_temp - s_last.ambient_temp) >= PYROMETER_HOT_DELTA_C) {
+        s_last.hot_detected = true;
+    }
+
     if (out) *out = s_last;
     return ESP_OK;
 }
 
 pyrometer_data_t pyrometer_get_last(void) { return s_last; }
+
+void pyrometer_start_search(void) {
+    s_last.searching    = true;
+    s_last.hot_detected = false;
+}
+
+void pyrometer_reset_search(void) {
+    s_last.searching    = false;
+    s_last.hot_detected = false;
+}

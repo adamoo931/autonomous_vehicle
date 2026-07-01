@@ -71,7 +71,8 @@ static const char DASHBOARD_HTML[] =
     "    <h2>&#127777;&#65039; Pirometr MLX90614</h2>\n"
     "    <div>Obiekt: <span class=\"val\" id=\"py-obj\">-</span> &#176;C</div>\n"
     "    <div>Otoczenie: <span class=\"val\" id=\"py-amb\">-</span> &#176;C</div>\n"
-    "    <div>Meta: <span class=\"val\" id=\"py-fin\">-</span></div>\n"
+    "    <div>Szukanie obiektu: <span class=\"val\" id=\"py-search\">-</span></div>\n"
+    "    <div>Obiekt cieplny: <span class=\"val\" id=\"py-hot\">-</span></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#128208; IMU ICM-20948</h2>\n"
@@ -169,7 +170,14 @@ static const char DASHBOARD_HTML[] =
     "    <a id=\"auto-log-link\" href=\"/api/autonomy/log.csv\" style=\"padding:10px 16px;border:1px solid #30363d;border-radius:6px;text-decoration:none;color:#c9d1d9;background:#21262d\">&#128190; Pobierz log przejazdu (CSV)</a>\n"
     "    <span style=\"font-size:0.85em;color:#8b949e\">wierszy w logu: <span class=\"val\" id=\"auto-logcount\">0</span></span>\n"
     "  </div>\n"
-    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Pojazd jedzie wolno, omija przeszkody wykryte lidarem, a zatrzymuje si&#281; po dojechaniu do obiektu o ok. 50&#176;C cieplejszego ni&#380; otoczenie (gor&#261;cy czajnik). Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
+    "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
+    "    <label>Azymut start&#8594;meta:</label>\n"
+    "    <input type=\"number\" id=\"auto-azimuth-in\" min=\"0\" max=\"359\" step=\"1\" value=\"0\" style=\"width:70px\">\n"
+    "    <span>&#176;</span>\n"
+    "    <button onclick=\"setAzimuth()\">Zapisz</button>\n"
+    "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"auto-azimuth-cur\">-</span>&#176;</span>\n"
+    "  </div>\n"
+    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost i zatrzymuje si&#281; na przeszkodzie wykrytej lidarem (bez omijania). Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
     "</div>\n"
     "\n"
     "<div class=\"card\" style=\"margin-bottom:8px\">\n"
@@ -227,7 +235,8 @@ static const char DASHBOARD_HTML[] =
     "    if(d.pyrometer){\n"
     "      document.getElementById('py-obj').textContent=d.pyrometer.object_temp.toFixed(1);\n"
     "      document.getElementById('py-amb').textContent=d.pyrometer.ambient_temp.toFixed(1);\n"
-    "      document.getElementById('py-fin').innerHTML=d.pyrometer.finish_detected?'<span class=\"ok\">META!</span>':'Nie';\n"
+    "      document.getElementById('py-search').innerHTML=d.pyrometer.searching?'<span class=\"tag tag-warn\">AKTYWNE</span>':'Nie';\n"
+    "      document.getElementById('py-hot').innerHTML=d.pyrometer.hot_detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
     "    }\n"
     "    if(d.imu){\n"
     "      document.getElementById('ax').textContent=d.imu.accel_x.toFixed(2);\n"
@@ -265,7 +274,7 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('od-t').textContent=d.odometry.dist_total_mm.toFixed(0);\n"
     "      document.getElementById('od-pl').textContent=d.odometry.pulses_left;\n"
     "      document.getElementById('od-pr').textContent=d.odometry.pulses_right;\n"
-    "      document.getElementById('od-fin').innerHTML=d.odometry.finish_detected?'<span class=\"ok\">WYKRYTA</span>':'Nie';\n"
+    "      document.getElementById('od-fin').innerHTML=d.odometry.finish_detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
     "    }\n"
     "    if(d.line_sensors){\n"
     "      var ls=d.line_sensors;\n"
@@ -278,7 +287,10 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('m-l').textContent=d.motors.left;\n"
     "      document.getElementById('m-r').textContent=d.motors.right;\n"
     "    }\n"
-    "    if(d.autonomy){updateAuto(d.autonomy.enabled,d.autonomy.state,d.autonomy.log_count);}\n"
+    "    if(d.autonomy){\n"
+    "      updateAuto(d.autonomy.enabled,d.autonomy.state,d.autonomy.log_count);\n"
+    "      document.getElementById('auto-azimuth-cur').textContent=d.autonomy.target_azimuth_deg.toFixed(0);\n"
+    "    }\n"
     "  }).catch(function(){\n"
     "    document.getElementById('status-bar').innerHTML='<span class=\"err\">&#128997; Brak polaczenia</span>';\n"
     "  });\n"
@@ -290,6 +302,10 @@ static const char DASHBOARD_HTML[] =
     "function buzzerStop(){fetch('/api/buzzer/stop',{method:'POST'});}\n"
     "function magCalStart(){fetch('/api/imu/mag_cal/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_ms:15000})});}\n"
     "function magSetNorth(){fetch('/api/imu/mag_cal/set_north',{method:'POST'});}\n"
+    "function setAzimuth(){\n"
+    "  var v=parseFloat(document.getElementById('auto-azimuth-in').value)||0;\n"
+    "  fetch('/api/autonomy/azimuth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({azimuth_deg:v})});\n"
+    "}\n"
     "\n"
     "var autoOn=false;\n"
     "function updateAuto(en,st,logCount){\n"
@@ -379,8 +395,9 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON *pyro = cJSON_CreateObject();
     cJSON_AddNumberToObject(pyro, "object_temp",  (double)pd.object_temp);
     cJSON_AddNumberToObject(pyro, "ambient_temp", (double)pd.ambient_temp);
-    cJSON_AddBoolToObject(pyro, "finish_detected", pd.finish_detected);
     cJSON_AddBoolToObject(pyro, "initialized",     pd.initialized);
+    cJSON_AddBoolToObject(pyro, "searching",       pd.searching);
+    cJSON_AddBoolToObject(pyro, "hot_detected",    pd.hot_detected);
     cJSON_AddItemToObject(root, "pyrometer", pyro);
 
     /* IMU */
@@ -462,6 +479,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(autoj, "enabled", autonomy_is_enabled());
     cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
     cJSON_AddNumberToObject(autoj, "log_count", autonomy_log_count());
+    cJSON_AddNumberToObject(autoj, "target_azimuth_deg", (double)autonomy_get_target_azimuth());
     cJSON_AddItemToObject(root, "autonomy", autoj);
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -523,9 +541,12 @@ static esp_err_t handle_led(httpd_req_t *req) {
     return ESP_OK;
 }
 
-/* POST /api/odometry/reset - zerowanie liczników odometrii. */
+/* POST /api/odometry/reset - zerowanie liczników odometrii, flagi mety
+ * i trybu szukania obiektu cieplnego pirometrem - czyli reset całego
+ * "przebiegu" przed kolejną próbą, nie tylko samej odometrii. */
 static esp_err_t handle_odo_reset(httpd_req_t *req) {
     odometry_reset();
+    pyrometer_reset_search();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
 }
@@ -722,6 +743,36 @@ static esp_err_t handle_autonomy(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* POST /api/autonomy/azimuth {"azimuth_deg":N} - zapisuje zgrubny azymut
+ * start->meta, przechowywany do wykorzystania przez przyszłą nawigację. */
+static esp_err_t handle_autonomy_azimuth(httpd_req_t *req) {
+    if (req->content_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing body");
+        return ESP_FAIL;
+    }
+    char buf[64];
+    if (read_body(req, buf, sizeof(buf)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    cJSON *j = cJSON_Parse(buf);
+    if (!j) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    cJSON *a = cJSON_GetObjectItem(j, "azimuth_deg");
+    if (!cJSON_IsNumber(a)) {
+        cJSON_Delete(j);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing azimuth_deg");
+        return ESP_FAIL;
+    }
+    autonomy_set_target_azimuth((float)a->valuedouble);
+    cJSON_Delete(j);
+
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
@@ -749,6 +800,7 @@ esp_err_t http_server_start(void) {
         { .uri="/api/buzzer/song",    .method=HTTP_POST, .handler=handle_buzzer_song },
         { .uri="/api/buzzer/stop",    .method=HTTP_POST, .handler=handle_buzzer_stop },
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
+        { .uri="/api/autonomy/azimuth", .method=HTTP_POST, .handler=handle_autonomy_azimuth },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
     };
 

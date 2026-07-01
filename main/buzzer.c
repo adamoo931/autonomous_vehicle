@@ -42,6 +42,14 @@ static const buzzer_note_t s_ice_cream_song[] = {
 };
 #define ICE_CREAM_SONG_LEN (sizeof(s_ice_cream_song) / sizeof(s_ice_cream_song[0]))
 
+/* Gama C-dur w górę - sygnał wykrycia obiektu cieplnego (odróżnia się od
+ * jinglu mety, żeby oba zdarzenia dało się rozpoznać po dźwięku). */
+static const buzzer_note_t s_scale_song[] = {
+    { NOTE_C4, 120 }, { NOTE_D4, 120 }, { NOTE_E4, 120 }, { NOTE_F4, 120 },
+    { NOTE_G4, 120 }, { NOTE_A4, 120 }, { NOTE_B4, 120 }, { NOTE_C5, 250 },
+};
+#define SCALE_SONG_LEN (sizeof(s_scale_song) / sizeof(s_scale_song[0]))
+
 void buzzer_init(void) {
     ledc_timer_config_t tmr = {
         .speed_mode      = LEDC_MODE,
@@ -203,4 +211,12 @@ void buzzer_play_melody(const buzzer_note_t *notes, size_t count,
 
 void buzzer_play_ice_cream_song(void) {
     buzzer_play_melody(s_ice_cream_song, ICE_CREAM_SONG_LEN, true, 3000);
+}
+
+void buzzer_play_ice_cream_song_once(void) {
+    buzzer_play_melody(s_ice_cream_song, ICE_CREAM_SONG_LEN, false, 0);
+}
+
+void buzzer_play_scale_once(void) {
+    buzzer_play_melody(s_scale_song, SCALE_SONG_LEN, false, 0);
 }

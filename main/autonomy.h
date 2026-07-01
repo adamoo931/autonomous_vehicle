@@ -3,21 +3,19 @@
 #include <stdint.h>
 
 /* =====================================================================
- *  Autonomia - reaktywne omijanie przeszkód oraz dojazd do celu
- *  termicznego (gorący obiekt wykrywany pirometrem MLX90614).
- *
- *  Algorytm jest uniwersalny i nie zna kształtu planszy:
- *    - LIDAR     -> przeszkody/ściany na wysokości robota,
- *    - odometria -> wykrywanie utknięcia (brak postępu),
- *    - pirometr  -> cel: obiekt o zadaną różnicę cieplejszy niż
- *                   otoczenie => META.
- *
- *  Wykrywanie krawędzi obszaru (czujniki linii CNY70) jest w tej wersji
- *  algorytmu wyłączone - do ewentualnego dodania w przyszłości.
+ *  Autonomia - etap 1: jazda na wprost od startu, zatrzymanie na
+ *  przeszkodzie wykrytej LIDAR-em. Bez omijania/skrętu - to świadomie
+ *  minimalna wersja do zweryfikowania samej integracji LIDAR+silniki,
+ *  zanim dojdzie etap 2 (skan otoczenia i wybór wystarczająco szerokiej
+ *  szczeliny, z uwzględnieniem zadanego azymutu start->meta) oraz etap 3
+ *  (szukanie źródła ciepła pirometrem po wykryciu mety magnetycznej -
+ *  patrz pyrometer_start_search()/main.c, zaimplementowane już osobno).
  *
  *  Tryb uruchamiany jest z dashboardu (POST /api/autonomy
  *  {"enable":true/false}). Każda ręczna komenda silników natychmiast
- *  wyłącza autonomię (kill-switch).
+ *  wyłącza autonomię (kill-switch). Napotkanie przeszkody też wyłącza
+ *  autonomię (s_enabled=false) - stan "Zatrzymany" zostaje widoczny na
+ *  dashboardzie do czasu ponownego włączenia.
  *
  *  LOG PRZEJAZDU
  *  Co STATUS_LOG_MS (patrz autonomy.c) do pamięci RAM zapisywany jest
@@ -37,9 +35,16 @@ void autonomy_set_enabled(bool enable);
 /* Czy autonomia jest aktualnie aktywna. */
 bool autonomy_is_enabled(void);
 
-/* Krótki opis bieżącego stanu (dla dashboardu), np. "Jazda", "Omijanie",
- * "META osiągnięta", "Awaria (utknięcie)". */
+/* Krótki opis bieżącego stanu (dla dashboardu), np. "Jazda",
+ * "Zatrzymany (przeszkoda)". */
 const char *autonomy_state_str(void);
+
+/* Zgrubny azymut start->meta [stopnie, 0..360), wpisywany z dashboardu
+ * przed przejazdem. Na razie tylko przechowywany - wykorzysta go przyszła
+ * logika nawigacji (etap 2) przy wyborze kierunku spośród kilku otwartych
+ * szczelin. */
+void  autonomy_set_target_azimuth(float deg);
+float autonomy_get_target_azimuth(void);
 
 /* =====================================================================
  *  LOG PRZEJAZDU (do pobrania jako CSV przez http_server.c)
