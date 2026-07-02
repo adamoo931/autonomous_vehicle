@@ -4,6 +4,9 @@
 #include "lidar.h"
 #include "pyrometer.h"
 #include "imu.h"
+#include "buzzer.h"
+#include "ina219.h"
+#include "odometry.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -23,6 +26,28 @@ static const char *TAG = "AUTO";
 #define LID_FRONT_DEG    0
 #define LID_MIRROR       0
 
+/* Na starcie (pojazd ustawiony ręcznie na torze) jedzie na wprost w SWOIM
+ * BIEŻĄCYM kierunku - bez żadnej korekty do zadanego azymutu - przez
+ * START_STRAIGHT_MM, zanim w ogóle zacznie celować w s_target_azimuth_deg
+ * (patrz ST_START). Unika to niepotrzebnego/przedwczesnego obrotu w miejscu
+ * tuż po starcie (np. gdy pojazd stoi blisko linii startowej albo ściany za
+ * plecami) - najpierw odjeżdża kawałek od miejsca startu, dopiero potem
+ * zaczyna nawigację do celu. Mierzone realnym dystansem z odometrii kół (nie
+ * czasem), żeby nie zależało od prędkości/podłoża. */
+#define START_STRAIGHT_MM   500
+
+/* Meta: czujnik Halla (taśma magnetyczna) nie nadaje się do jej wykrycia w
+ * tym torze - tor jest otoczony identyczną taśmą odblaskową po całym
+ * obwodzie, więc przekroczenie dowolnej krawędzi dawałoby fałszywe
+ * wykrycie. Zamiast tego meta wykrywana jest po źródle ciepła, które
+ * znajduje się ok. 30-50 cm za linią mety, na kursie do zadanego azymutu -
+ * pirometr mierzy je "po drodze", bez potrzeby osobnego skanowania.
+ * Eksperymentalnie: identyczne źródło w odległości ok. 40 cm daje różnicę
+ * temperatury obiekt-otoczenie ok. 1,5 st. C - próg ustawiony wprost na tę
+ * wartość (pirometr ma krótki zasięg, a po drodze przejazdu nie ma innych
+ * źródeł ciepła niż to przy mecie, więc nie trzeba dodatkowego zapasu). */
+#define FINISH_HEAT_DELTA_C   1.5f
+
 /* Prędkości [% mocy]. Wartości dobrane pod miękkie podłoże (dywan/wykładzina),
  * gdzie poniżej ~35% lekki pojazd nie utrzymuje ruchu (może się zatrzymać
  * w trakcie jazdy). Wróć do 35 (sprzed prób spowalniania) - błąd z
@@ -36,8 +61,16 @@ static const char *TAG = "AUTO";
 #define KICK_MS         150      /* czas trwania impulsu [ms] */
 
 /* Próg wykrycia przeszkody: swobodna przestrzeń z przodu poniżej tej
- * wartości = stop i próba ominięcia (patrz szukanie szczeliny niżej). */
-#define FRONT_STOP_MM   400      /* [mm] */
+ * wartości = stop i próba ominięcia (patrz szukanie szczeliny niżej).
+ * Zmniejszone z 400 do 300mm celowo - eksperymentalnie granica, przy której
+ * pirometr łapie FINISH_HEAT_DELTA_C (1,5 st. C), wypadała w praktyce w
+ * okolicach tych samych ~400mm co ten próg, więc LIDAR (odczyt natychmiastowy)
+ * niemal zawsze wygrywał wyścig z pirometrem (odczyt potrzebuje chwili na
+ * ustabilizowanie) i traktował źródło ciepła jak zwykłą przeszkodę, zanim
+ * zdążyliśmy je rozpoznać jako metę - patrz FINISH_HEAT_DELTA_C. Bliższy
+ * próg daje realnie wyższą (nie tylko bardziej czasochłonną) deltę
+ * temperatury w momencie zatrzymania. Patrz też OBSTACLE_DWELL_MS niżej. */
+#define FRONT_STOP_MM   300      /* [mm] */
 #define D_OPEN_MM      4000      /* brak echa interpretowany jako ta odległość (otwarte) */
 
 /* Etap 2: ominięcie przeszkody przez sprawdzenie korytarza. Zamiast zgadywać
@@ -66,16 +99,29 @@ static const char *TAG = "AUTO";
 #define GAP_STEP_DEG               5
 #define GAP_DWELL_MS             400
 #define GAP_MAX_RETRIES             5    /* tyle nieudanych prób z rzędu => trwały stop */
-#define GAP_CLEAR_SEGMENT_MS    1200    /* krótki odcinek jazdy przez szczelinę - szybszy powrót do celu */
+#define GAP_CLEAR_SEGMENT_MS    2500    /* odcinek jazdy przez szczelinę, zanim wrócimy do korekty w stronę
+                                          * prawdziwego celu - musi starczyć, by realnie minąć przeszkodę
+                                          * (nie tylko wystartować w jej kierunku), inaczej korekta ciągnie
+                                          * pojazd z powrotem w przeszkodę, zanim ją minie */
 #define DEG_TO_RAD_F      0.017453292f
+
+/* Krótki postój tuż po wykryciu przeszkody, ZANIM zaczniemy się cofać -
+ * kontrola mety (FINISH_HEAT_DELTA_C) sprawdzana jest co pętlę niezależnie
+ * od stanu, więc te ~400ms w bezruchu blisko obiektu to kilka dodatkowych
+ * prób złapania progu temperatury, zanim odjedziemy i delta zacznie spadać.
+ * Nie wpływa na dystans cofania (BACKUP_MS liczy się od końca tego postoju). */
+#define OBSTACLE_DWELL_MS  400
 
 /* Cofnięcie przed skanowaniem/obrotem: przy zatrzymaniu blisko przeszkody
  * (zwłaszcza w rogu/ciasnym zakątku) sam obrót w miejscu potrafi zahaczyć
  * o przeszkodę z boku, mimo że docelowy kierunek jest wolny - bo pojazd
  * zamiata swoim obrysem cały łuk pośredni, nie tylko cel. Krótkie cofnięcie
- * daje zapas, zanim ST_SCAN_GAP zacznie oceniać kierunki. */
+ * daje zapas, zanim ST_SCAN_GAP zacznie oceniać kierunki. Wydłużone z 600 do
+ * 750ms - częściowa rekompensata zmniejszonego FRONT_STOP_MM (pojazd
+ * zatrzymuje się bliżej niż wcześniej, więc potrzebuje odrobinę więcej
+ * cofania, by mieć podobny odstęp przed skanowaniem). */
 #define SP_BACK           35      /* moc cofania [%], jak SP_CRUISE */
-#define BACKUP_MS        600      /* czas cofania przed skanowaniem */
+#define BACKUP_MS        750      /* czas cofania przed skanowaniem (po OBSTACLE_DWELL_MS) */
 
 /* Wyrównywanie do zadanego azymutu (magnetometr IMU, patrz sensors/imu.c).
  *
@@ -142,6 +188,7 @@ static const char *TAG = "AUTO";
  * uda - trwały stop. */
 typedef enum {
     ST_IDLE,      /* wyłączony / bezczynny */
+    ST_START,     /* odcinek startowy na wprost, bez korekty azymutu (patrz START_STRAIGHT_MM) */
     ST_ALIGN,     /* obrót w miejscu do osiągnięcia zadanego kursu (celu lub szczeliny) */
     ST_CRUISE,    /* jazda na wprost wzdłuż zadanego kursu */
     ST_BACKUP,    /* przeszkoda z przodu - krótkie cofnięcie przed skanowaniem/obrotem */
@@ -159,6 +206,7 @@ static uint32_t s_log_t        = 0;   /* ms ostatniego szczegółowego logu */
 static int      s_align_confirm = 0;  /* licznik kolejnych przebiegów w tolerancji (ST_ALIGN, tryb magnetometru) */
 static int      s_gap_retries   = 0;  /* licznik prób ominięcia z rzędu bez pełnego czystego odcinka */
 static bool     s_in_gap_clear  = false;  /* czy bieżący ST_CRUISE to przejazd przez szczelinę (krótszy odcinek) */
+static float    s_start_dist0_mm = 0.0f;  /* dystans odometrii przy wejsciu w ST_START (baza do odliczenia START_STRAIGHT_MM) */
 
 /* Zgrubny azymut start->meta, wpisywany z dashboardu przed przejazdem. */
 static float s_target_azimuth_deg = 0.0f;
@@ -172,11 +220,19 @@ static uint32_t           s_log_n        = 0;     /* liczba zapisanych rekordów
 static uint32_t           s_run_t0       = 0;     /* ms startu bieżącego przejazdu */
 static bool      s_log_full_warned = false;
 
+/* Czas trwania i zużyta energia bieżącego/ostatniego przejazdu (od startu do
+ * zatrzymania autonomii). s_run_elapsed_ms jest zamrażane w momencie
+ * zatrzymania (patrz stop_run()) - w trakcie jazdy odczyt liczony jest na
+ * bieżąco z s_run_t0, żeby dashboard mógł pokazywać rosnący stoper. */
+static uint32_t s_run_elapsed_ms = 0;
+static float    s_run_energy_mwh = 0.0f;  /* energia scałkowana z odczytów INA219 [mWh] */
+
 /* Nazwa stanu dla danej wartości enuma. Współdzielona przez podgląd na żywo
  * (autonomy_state_str) oraz log CSV (autonomy_log_state_name). */
 static const char *state_name(st_t s) {
     switch (s) {
         case ST_IDLE:     return "Bezczynny";
+        case ST_START:    return "Start (na wprost)";
         case ST_ALIGN:    return "Wyrownywanie azymutu";
         case ST_CRUISE:   return "Jazda";
         case ST_BACKUP:   return "Cofanie";
@@ -190,6 +246,12 @@ static inline uint32_t now_ms(void) {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 static inline void enter(st_t s) { s_state = s; s_state_t = now_ms(); }
+
+/* Zatrzymuje bieżący przejazd: zamraża czas jego trwania (dalsze odczyty
+ * dashboardu mają pokazywać czas do TEGO momentu, nie licznik biegnący od
+ * s_run_t0 do "teraz"). Wołane wyłącznie z s_enabled==true, więc bezpiecznie
+ * nadpisuje s_run_elapsed_ms tylko raz na przejazd. */
+static inline void stop_run(void) { s_run_elapsed_ms = now_ms() - s_run_t0; }
 
 /* Minimalna odległość w łuku względem przodu robota (z uwzględnieniem kalibracji). */
 static inline uint16_t arc(int rel_center, int half) {
@@ -257,6 +319,21 @@ static inline bool corridor_clear(int center_deg, int lookahead_mm) {
     return corridor_margin(center_deg, lookahead_mm) >= lookahead_mm;
 }
 
+/* Kandydat z find_gap() musi być czysty nie tylko na pełnym GAP_LOOKAHEAD_MM,
+ * ale też na krótszych dystansach - krótszy lookahead oznacza SZERSZY kąt
+ * promieni krawędziowych (edge_deg = atan(pół_szerokości/lookahead) rośnie,
+ * gdy lookahead maleje), więc lepiej wykrywa ścianę widzianą niemal "z boku"
+ * (prawie równolegle do jednego, wąskiego, dalekiego promienia). Taki promień
+ * potrafi "prześlizgnąć się" wzdłuż otwartego korytarza tuż obok ściany, nie
+ * trafiając w nią wcale - find_gap() widział to wtedy jako najbardziej otwarty
+ * kierunek (często z największym marginesem ze wszystkich!), mimo że w
+ * praktyce biegnie tuż wzdłuż dłuższego boku przeszkody (np. rogu w kształcie
+ * odwróconego L) i pojazd uderzał w nią bokiem po ułamku sekundy jazdy. */
+static inline bool corridor_clear_near(int center_deg) {
+    return corridor_clear(center_deg, FRONT_STOP_MM) &&
+           corridor_clear(center_deg, (FRONT_STOP_MM + GAP_LOOKAHEAD_MM) / 2);
+}
+
 #define GAP_MAX_CANDS       80
 /* Kandydaci o marginesie w obrębie tej wartości od najlepszego znalezionego
  * są traktowani jako porównywalnie bezpieczni - między nimi decyduje kierunek
@@ -266,12 +343,14 @@ static inline bool corridor_clear(int center_deg, int lookahead_mm) {
 #define GAP_MARGIN_TIE_MM  150.0f
 
 /* Dla każdego kandydującego kierunku w łuku +/-search_half_deg od przodu
- * liczy margines korytarza (corridor_margin) przy GAP_LOOKAHEAD_MM. Spośród
- * kandydatów z marginesem >= GAP_LOOKAHEAD_MM wybiera najpierw ten o
- * największym marginesie (najbezpieczniejszy, najbardziej centralny w wolnej
- * przestrzeni); kierunek na cel (desired_rel_deg) decyduje tylko między
- * porównywalnie bezpiecznymi (patrz GAP_MARGIN_TIE_MM). Zwraca true i
- * wypełnia *out_rel_deg (kąt względem przodu), jeśli coś znaleziono. */
+ * liczy margines korytarza (corridor_margin) przy GAP_LOOKAHEAD_MM i musi też
+ * przejść corridor_clear_near() (bliższe kontrole - łapią ścianę widzianą
+ * "z boku", patrz komentarz przy tej funkcji). Spośród kandydatów, które
+ * przejdą obie kontrole, wybiera najpierw ten o największym marginesie
+ * (najbezpieczniejszy, najbardziej centralny w wolnej przestrzeni); kierunek
+ * na cel (desired_rel_deg) decyduje tylko między porównywalnie bezpiecznymi
+ * (patrz GAP_MARGIN_TIE_MM). Zwraca true i wypełnia *out_rel_deg (kąt
+ * względem przodu), jeśli coś znaleziono. */
 static bool find_gap(float desired_rel_deg, int search_half_deg, int *out_rel_deg) {
     int cand_deg[GAP_MAX_CANDS];
     int cand_margin[GAP_MAX_CANDS];
@@ -279,7 +358,7 @@ static bool find_gap(float desired_rel_deg, int search_half_deg, int *out_rel_de
 
     for (int a = -search_half_deg; a <= search_half_deg && n < GAP_MAX_CANDS; a += GAP_STEP_DEG) {
         int margin = corridor_margin(a, GAP_LOOKAHEAD_MM);
-        if (margin >= GAP_LOOKAHEAD_MM) {
+        if (margin >= GAP_LOOKAHEAD_MM && corridor_clear_near(a)) {
             cand_deg[n]    = a;
             cand_margin[n] = margin;
             n++;
@@ -352,7 +431,15 @@ static void autonomy_task(void *arg) {
 
         pyrometer_data_t pd  = pyrometer_get_last();
         imu_data_t       imu = imu_get_last();
+        ina219_data_t    pw  = ina219_get_last();
         float herr = heading_error_deg(s_nav_target_deg, imu.azimuth_deg);
+
+        /* Całkowanie energii: moc [mW] * czas [h] = energia [mWh]. Zakładany
+         * krok czasowy to LOOP_MS (czas pracy ciała pętli jest pomijalny wobec
+         * vTaskDelay na jej końcu), spójnie z resztą modułu, która też liczy
+         * czasy stanów w wielokrotnościach LOOP_MS zamiast mierzyć rzeczywiste
+         * odstępy między iteracjami. */
+        s_run_energy_mwh += pw.power_mw * (LOOP_MS / 3600000.0f);
 
         /* Łuki LIDAR liczone raz na cykl - front_raw to teraz tylko
          * telemetria/log (decyzję o zatrzymaniu podejmuje corridor_clear(),
@@ -386,12 +473,71 @@ static void autonomy_task(void *arg) {
             continue;
         }
 
+        /* Meta wykryta po źródle ciepła (patrz komentarz przy
+         * FINISH_HEAT_DELTA_C) - ma priorytet nad bieżącym stanem, żeby
+         * zatrzymać pojazd niezależnie od tego, czy akurat jedzie, skręca,
+         * czy szuka szczeliny. */
+        if ((pd.object_temp - pd.ambient_temp) >= FINISH_HEAT_DELTA_C) {
+            ESP_LOGI(TAG, "Zrodlo ciepla wykryte (delta=%.1f st. >= %.1f st.) - meta, zatrzymuje pojazd.",
+                     pd.object_temp - pd.ambient_temp, FINISH_HEAT_DELTA_C);
+            motor_stop();
+            buzzer_play_scale_once();
+            enter(ST_STOPPED);
+            stop_run();
+            s_enabled = false;
+            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            continue;
+        }
+
         switch (s_state) {
 
         case ST_IDLE:
             enter(ST_ALIGN);
             s_align_confirm = 0;
             break;
+
+        case ST_START: {
+            /* Przeszkoda na starcie - taka sama reakcja jak w ST_CRUISE,
+             * zamiast ślepo jechać do przodu przez cały START_STRAIGHT_MM. */
+            if (!corridor_clear(0, FRONT_STOP_MM)) {
+                motor_stop();
+                s_gap_retries++;
+                if (s_gap_retries > GAP_MAX_RETRIES) {
+                    ESP_LOGE(TAG, "Zbyt wiele nieudanych prob ominiecia (%d) na starcie - zatrzymuje pojazd na stale.",
+                             s_gap_retries);
+                    enter(ST_STOPPED);
+                    stop_run();
+                    s_enabled = false;
+                    break;
+                }
+                ESP_LOGI(TAG, "Przeszkoda na starcie (margines=%d mm) - cofam sie przed skanowaniem (proba #%d).",
+                         corridor_margin(0, FRONT_STOP_MM), s_gap_retries);
+                enter(ST_BACKUP);
+                break;
+            }
+
+            float traveled_mm = odometry_get().dist_total_mm - s_start_dist0_mm;
+            if (traveled_mm >= START_STRAIGHT_MM) {
+                ESP_LOGI(TAG, "Odcinek startowy zakonczony (%.0f mm) - przechodze do nawigacji do celu (azymut=%.1f st.).",
+                         traveled_mm, s_target_azimuth_deg);
+                motor_stop();
+                enter(ST_ALIGN);
+                s_align_confirm = 0;
+                break;
+            }
+
+            /* Jazda na wprost w bieżącym kierunku - bez korekty azymutu,
+             * identycznie jak zwykła jazda w ST_CRUISE (impuls rozruchowy,
+             * potem stała prędkość, oba koła równo). */
+            if (now - s_state_t < KICK_MS) {
+                motor_set_left(KICK_POWER);
+                motor_set_right(KICK_POWER);
+            } else {
+                motor_set_left(SP_CRUISE);
+                motor_set_right(SP_CRUISE);
+            }
+            break;
+        }
 
         case ST_ALIGN:
             /* Brak magnetometru - nie ma czego wyrównywać, jedź od razu. */
@@ -445,6 +591,7 @@ static void autonomy_task(void *arg) {
                     ESP_LOGE(TAG, "Zbyt wiele nieudanych prob ominiecia (%d) - zatrzymuje pojazd na stale.",
                              s_gap_retries);
                     enter(ST_STOPPED);
+                    stop_run();
                     s_enabled = false;
                     break;
                 }
@@ -496,13 +643,23 @@ static void autonomy_task(void *arg) {
         }
 
         case ST_BACKUP:
-            if (now - s_state_t < BACKUP_MS) {
-                int pow = (now - s_state_t < KICK_MS) ? KICK_POWER : SP_BACK;
-                motor_set_left(-pow);
-                motor_set_right(-pow);
-            } else {
+            /* Postój przed cofnięciem (patrz OBSTACLE_DWELL_MS) - pojazd
+             * stoi blisko obiektu, dając pirometrowi dodatkowe próby złapania
+             * FINISH_HEAT_DELTA_C, zanim zaczniemy się od niego oddalać. */
+            if (now - s_state_t < OBSTACLE_DWELL_MS) {
                 motor_stop();
-                enter(ST_SCAN_GAP);
+                break;
+            }
+            {
+                uint32_t t = now - s_state_t - OBSTACLE_DWELL_MS;
+                if (t < BACKUP_MS) {
+                    int pow = (t < KICK_MS) ? KICK_POWER : SP_BACK;
+                    motor_set_left(-pow);
+                    motor_set_right(-pow);
+                } else {
+                    motor_stop();
+                    enter(ST_SCAN_GAP);
+                }
             }
             break;
 
@@ -537,6 +694,7 @@ static void autonomy_task(void *arg) {
                     ESP_LOGW(TAG, "Brak wystarczajaco szerokiej szczeliny nawet w zasiegu +/-%d st. - zatrzymuje pojazd.",
                              GAP_SEARCH_WIDE_DEG);
                     enter(ST_STOPPED);
+                    stop_run();
                     s_enabled = false;
                 }
             }
@@ -562,18 +720,28 @@ void autonomy_set_enabled(bool enable) {
         s_nav_target_deg = s_target_azimuth_deg;   /* na start celujemy w prawdziwy cel, nie w szczelinę */
         s_gap_retries    = 0;
         s_in_gap_clear   = false;
-        enter(ST_ALIGN);
+        /* Najpierw krótki odcinek na wprost w bieżącym kierunku (patrz
+         * START_STRAIGHT_MM) - dopiero potem pierwsze wyrównanie do azymutu. */
+        enter(ST_START);
+        s_start_dist0_mm = odometry_get().dist_total_mm;
         s_align_confirm = 0;
         s_stopped = false;
         /* Nowy przejazd => nowy log (poprzedni, jeśli nie pobrany, zostaje nadpisany). */
         s_log_n           = 0;
         s_log_full_warned = false;
         s_run_t0          = now_ms();
+        s_run_elapsed_ms  = 0;
+        s_run_energy_mwh  = 0.0f;
         s_log_t           = 0;          /* wymuś natychmiastowy pierwszy rekord */
         s_enabled = true;
-        ESP_LOGI(TAG, "Autonomia WLACZONA (wyrownanie do azymutu %.1f st., log przejazdu wyzerowany).",
-                 s_target_azimuth_deg);
+        ESP_LOGI(TAG, "Autonomia WLACZONA (najpierw %d mm na wprost, potem wyrownanie do azymutu %.1f st., log przejazdu wyzerowany).",
+                 START_STRAIGHT_MM, s_target_azimuth_deg);
     } else {
+        /* Zamrażamy czas przejazdu tylko przy realnym przejściu wł.->wył. -
+         * ten handler bywa wołany też wtedy, gdy autonomia jest już
+         * wyłączona (np. przy każdym ręcznym ruchu silnika, patrz
+         * http_server.c: handle_motor), a s_run_t0 nie jest wtedy świeże. */
+        if (s_enabled) stop_run();
         s_enabled = false;
         motor_stop();
         if (s_state != ST_STOPPED) enter(ST_IDLE);
@@ -594,6 +762,17 @@ void autonomy_set_target_azimuth(float deg) {
 }
 
 float autonomy_get_target_azimuth(void) { return s_target_azimuth_deg; }
+
+/* Czas trwania bieżącego (jeśli s_enabled) albo ostatniego (zamrożony przez
+ * stop_run()) przejazdu, w sekundach. */
+float autonomy_get_run_time_s(void) {
+    uint32_t ms = s_enabled ? (now_ms() - s_run_t0) : s_run_elapsed_ms;
+    return (float)ms / 1000.0f;
+}
+
+/* Energia zużyta w bieżącym/ostatnim przejeździe [mWh], scałkowana z
+ * odczytów INA219 od startu do zatrzymania autonomii. */
+float autonomy_get_run_energy_mwh(void) { return s_run_energy_mwh; }
 
 /* API logu przejazdu. */
 uint32_t autonomy_log_count(void) { return s_log_n; }

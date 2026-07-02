@@ -107,6 +107,8 @@ static const char DASHBOARD_HTML[] =
     "    <div>Suma: <span class=\"val\" id=\"od-t\">-</span> mm</div>\n"
     "    <div>Impulsy L/P: <span class=\"val\" id=\"od-pl\">-</span> / <span class=\"val\" id=\"od-pr\">-</span></div>\n"
     "    <div>Hall meta: <span class=\"val\" id=\"od-fin\">-</span></div>\n"
+    "    <div>Czas przejazdu: <span class=\"val\" id=\"od-time\">-</span> s</div>\n"
+    "    <div>Zu&#380;yta energia: <span class=\"val\" id=\"od-energy\">-</span> mWh</div>\n"
     "    <br><button onclick=\"fetch('/api/odometry/reset',{method:'POST'})\">&#128260; Reset</button>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
@@ -290,6 +292,8 @@ static const char DASHBOARD_HTML[] =
     "    if(d.autonomy){\n"
     "      updateAuto(d.autonomy.enabled,d.autonomy.state,d.autonomy.log_count);\n"
     "      document.getElementById('auto-azimuth-cur').textContent=d.autonomy.target_azimuth_deg.toFixed(0);\n"
+    "      document.getElementById('od-time').textContent=d.autonomy.run_time_s.toFixed(1);\n"
+    "      document.getElementById('od-energy').textContent=d.autonomy.run_energy_mwh.toFixed(1);\n"
     "    }\n"
     "  }).catch(function(){\n"
     "    document.getElementById('status-bar').innerHTML='<span class=\"err\">&#128997; Brak polaczenia</span>';\n"
@@ -480,6 +484,8 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
     cJSON_AddNumberToObject(autoj, "log_count", autonomy_log_count());
     cJSON_AddNumberToObject(autoj, "target_azimuth_deg", (double)autonomy_get_target_azimuth());
+    cJSON_AddNumberToObject(autoj, "run_time_s", (double)autonomy_get_run_time_s());
+    cJSON_AddNumberToObject(autoj, "run_energy_mwh", (double)autonomy_get_run_energy_mwh());
     cJSON_AddItemToObject(root, "autonomy", autoj);
 
     char *json_str = cJSON_PrintUnformatted(root);

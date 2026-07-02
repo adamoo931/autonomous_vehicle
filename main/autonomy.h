@@ -46,6 +46,13 @@ const char *autonomy_state_str(void);
 void  autonomy_set_target_azimuth(float deg);
 float autonomy_get_target_azimuth(void);
 
+/* Czas trwania [s] i energia zużyta [mWh] w bieżącym/ostatnim przejeździe,
+ * liczone od startu (autonomy_set_enabled(true)) do zatrzymania autonomii
+ * (ręcznego lub wewnętrznego - meta/przeszkoda bez szczeliny). Energia jest
+ * całkowana z odczytów INA219 w pętli sterowania (patrz autonomy.c). */
+float autonomy_get_run_time_s(void);
+float autonomy_get_run_energy_mwh(void);
+
 /* =====================================================================
  *  LOG PRZEJAZDU (do pobrania jako CSV przez http_server.c)
  * ===================================================================== */
