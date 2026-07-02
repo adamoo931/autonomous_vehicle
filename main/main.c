@@ -111,6 +111,9 @@ void app_main(void) {
     web_monitor_init();
 
     ESP_LOGI(TAG, "=== Autonomous Vehicle - Start ===");
+    /* Sieć WiFi oraz serwer HTTP z dashboardem. */
+    wifi_init_sta();
+    http_server_start();
 
     /* NVS - wymagane przez sterownik WiFi. */
     esp_err_t ret = nvs_flash_init();
