@@ -6,6 +6,7 @@
 #include "imu.h"
 #include "ina219.h"
 #include "sht40.h"
+#include "ads1115.h"
 #include "buzzer.h"
 #include "lidar.h"
 #include "autonomy.h"
@@ -101,12 +102,17 @@ static const char DASHBOARD_HTML[] =
     "    <div>Adres I2C: <span class=\"val\" id=\"sh-addr\">-</span></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
+    "    <h2>&#129442; Halla mety (SS495A)</h2>\n"
+    "    <div>Napi&#281;cie: <span class=\"val\" id=\"hl-v\">-</span> V</div>\n"
+    "    <div>Meta: <span class=\"val\" id=\"hl-det\">-</span></div>\n"
+    "    <div>Adres I2C: <span class=\"val\" id=\"hl-addr\">-</span></div>\n"
+    "  </div>\n"
+    "  <div class=\"card\">\n"
     "    <h2>&#128207; Odometria</h2>\n"
     "    <div>Lewe: <span class=\"val\" id=\"od-l\">-</span> mm</div>\n"
     "    <div>Prawe: <span class=\"val\" id=\"od-r\">-</span> mm</div>\n"
     "    <div>Suma: <span class=\"val\" id=\"od-t\">-</span> mm</div>\n"
     "    <div>Impulsy L/P: <span class=\"val\" id=\"od-pl\">-</span> / <span class=\"val\" id=\"od-pr\">-</span></div>\n"
-    "    <div>Hall meta: <span class=\"val\" id=\"od-fin\">-</span></div>\n"
     "    <div>Czas przejazdu: <span class=\"val\" id=\"od-time\">-</span> s</div>\n"
     "    <div>Zu&#380;yta energia: <span class=\"val\" id=\"od-energy\">-</span> mWh</div>\n"
     "    <br><button onclick=\"fetch('/api/odometry/reset',{method:'POST'})\">&#128260; Reset</button>\n"
@@ -276,7 +282,11 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('od-t').textContent=d.odometry.dist_total_mm.toFixed(0);\n"
     "      document.getElementById('od-pl').textContent=d.odometry.pulses_left;\n"
     "      document.getElementById('od-pr').textContent=d.odometry.pulses_right;\n"
-    "      document.getElementById('od-fin').innerHTML=d.odometry.finish_detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
+    "    }\n"
+    "    if(d.hall){\n"
+    "      document.getElementById('hl-v').textContent=d.hall.voltage_v.toFixed(3);\n"
+    "      document.getElementById('hl-det').innerHTML=d.hall.finish_detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
+    "      document.getElementById('hl-addr').innerHTML=d.hall.initialized?('0x'+d.hall.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
     "    }\n"
     "    if(d.line_sensors){\n"
     "      var ls=d.line_sensors;\n"
@@ -460,8 +470,16 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(odo, "dist_left_mm",   (double)od.dist_left_mm);
     cJSON_AddNumberToObject(odo, "dist_right_mm",  (double)od.dist_right_mm);
     cJSON_AddNumberToObject(odo, "dist_total_mm",  (double)od.dist_total_mm);
-    cJSON_AddBoolToObject(odo, "finish_detected",  od.finish_detected);
     cJSON_AddItemToObject(root, "odometry", odo);
+
+    /* Czujnik Halla mety (SS495A przez ADS1115) */
+    ads1115_data_t hall = ads1115_get_last();
+    cJSON *hallj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(hallj, "voltage_v",       (double)hall.voltage_v);
+    cJSON_AddBoolToObject(hallj,   "finish_detected", hall.finish_detected);
+    cJSON_AddNumberToObject(hallj, "address",         hall.address);
+    cJSON_AddBoolToObject(hallj,   "initialized",     hall.initialized);
+    cJSON_AddItemToObject(root, "hall", hallj);
 
     /* Czujniki linii */
     line_sensor_data_t ls = line_sensor_read();

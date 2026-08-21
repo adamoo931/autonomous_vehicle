@@ -4,7 +4,8 @@
 
 /*
  * Odometria — pomiar przebytej drogi na podstawie impulsów z czujników
- * Halla obu kół oraz detekcja mety osobnym czujnikiem Halla.
+ * Halla obu kół. Detekcja mety jest teraz osobnym, analogowym czujnikiem
+ * Halla SS495A odczytywanym przez ADS1115 - patrz sensors/ads1115.h.
  *
  * Impulsy zliczane są w procedurach obsługi przerwań GPIO; przeliczenie na
  * milimetry odbywa się przy odczycie (stała MM_PER_PULSE z config.h).
@@ -16,13 +17,12 @@ typedef struct {
     float    dist_left_mm;    /* droga lewego koła [mm]                    */
     float    dist_right_mm;   /* droga prawego koła [mm]                   */
     float    dist_total_mm;   /* średnia droga obu kół [mm]                */
-    bool     finish_detected; /* czujnik Halla mety zadziałał              */
 } odometry_data_t;
 
 /* Konfiguruje piny i instaluje procedury obsługi przerwań. */
 void odometry_init(void);
 
-/* Zeruje liczniki impulsów oraz flagę mety. */
+/* Zeruje liczniki impulsów. */
 void odometry_reset(void);
 
 /* Zwraca bieżący stan odometrii (liczniki + przeliczone odległości). */

@@ -32,11 +32,15 @@
 #define PIN_LINE_BR     23      /* tył-prawy                                */
 
 /* ============================================================
- *  Czujniki Halla — odometria kół + detekcja mety
- * ============================================================ */
+ *  Czujniki Halla — odometria kół (cyfrowe, GPIO)
+ * ============================================================
+ *  Detekcja mety przeniesiona na osobny, analogowy czujnik Halla SS495A
+ *  odczytywany przez ADS1115 (patrz sensors/ads1115.c oraz sekcja adresów
+ *  I2C i progów detekcji niżej) — GPIO34 (dawny PIN_HALL_FINISH) jest teraz
+ *  wolne.
+ */
 #define PIN_HALL_LEFT    2      /* enkoder lewego koła                      */
 #define PIN_HALL_RIGHT  36      /* enkoder prawego koła (GPIO tylko-wejście)*/
-#define PIN_HALL_FINISH 34      /* czujnik mety        (GPIO tylko-wejście) */
 
 /* ============================================================
  *  Magistrala I2C — wspólna dla wszystkich czujników I2C/SMBus
@@ -64,7 +68,7 @@
  *  dlatego logi są dostępne przez monitor webowy (zob. web_monitor.c).
  *  Ustaw LIDAR_ENABLED na 0, aby debugować przez konsolę USB-Serial.
  */
-#define LIDAR_ENABLED    1
+#define LIDAR_ENABLED    0
 #define PIN_LIDAR_TX     3      /* ESP TX -> RX lidaru (komendy)            */
 #define PIN_LIDAR_RX     1      /* ESP RX <- TX lidaru (dane pomiarowe)     */
 #define LIDAR_UART_PORT  UART_NUM_2
@@ -99,6 +103,7 @@
 #define ICM20948_ADDR   0x69    /* IMU ICM-20948 (AD0 = VCC)                */
 #define INA219_ADDR     0x40    /* monitor prądu/napięcia (A0 = A1 = GND)   */
 #define SHT40_ADDR      0x44    /* czujnik temperatury i wilgotności        */
+#define ADS1115_ADDR    0x48    /* ADC dla czujnika Halla mety (ADDR = GND) */
 
 /* Rezystancja bocznika pomiarowego INA219 (R13) w omach. */
 #define INA219_SHUNT_OHMS  0.05f
@@ -129,3 +134,17 @@
  * obiekt - otoczenie), aktywowanym po wykryciu mety Hallem - patrz
  * pyrometer_start_search() w sensors/pyrometer.c. */
 #define PYROMETER_HOT_DELTA_C          4.0f
+
+/* ============================================================
+ *  Próg detekcji mety przez czujnik Halla SS495A (przez ADS1115)
+ * ============================================================
+ *  SS495A jest liniowy (ratiometryczny) - napięcie w normalnej pracy
+ *  (zmierzone na sprzęcie, bez magnesu mety w pobliżu) wynosi ok. 2,488V, a
+ *  zbliżenie magnesu (dowolnym biegunem) odchyla je w górę lub w dół.
+ *  Metę wykrywamy więc jako wyjście napięcia POZA pasmo
+ *  HALL_FINISH_LOW_V..HALL_FINISH_HIGH_V - patrz sensors/ads1115.c. Dostrój
+ *  obie granice eksperymentalnie na docelowym sprzęcie (jak
+ *  PYROMETER_FINISH_THRESHOLD_C wcześniej dla pirometru), jeśli napięcie
+ *  spoczynkowe się zmieni (np. inny egzemplarz czujnika/zasilanie). */
+#define HALL_FINISH_LOW_V     2.45f   /* poniżej tego = wykryto metę [V] */
+#define HALL_FINISH_HIGH_V    2.52f   /* powyżej tego = wykryto metę [V] */

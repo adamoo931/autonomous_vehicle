@@ -14,6 +14,7 @@
 #include "imu.h"
 #include "ina219.h"
 #include "sht40.h"
+#include "ads1115.h"
 #include "buzzer.h"
 #include "lidar.h"
 #include "autonomy.h"
@@ -46,6 +47,7 @@ static void sensor_task(void *arg) {
     imu_data_t      imu;
     pyrometer_data_t pyro;
     ina219_data_t   ina;
+    ads1115_data_t  hall;
     int slow = 0;
     bool was_finish = false;   /* poprzedni stan czujnika Halla mety - do wykrycia zbocza */
     bool was_hot    = false;   /* poprzedni stan wykrycia obiektu cieplnego - do wykrycia zbocza */
@@ -54,6 +56,7 @@ static void sensor_task(void *arg) {
         imu_read(&imu);
         pyrometer_read(&pyro);
         ina219_read(&ina);
+        ads1115_read(&hall);
         /* SHT40 (temperatura/wilgotność) zmienia się wolno - odczyt co ~1 s. */
         if (++slow >= 10) {
             slow = 0;
@@ -69,11 +72,13 @@ static void sensor_task(void *arg) {
         led_set_green(auto_on);
         led_set_red(!auto_on);
 
-        /* Meta (czujnik Halla, GPIO34): zbocze "niewykryto -> wykryto"
-         * odgrywa jingle raz, nie w pętli, i uruchamia tryb szukania obiektu
-         * cieplnego pirometrem. Sam odczyt/aktualizacja pola na dashboardzie
-         * dzieje się już w http_server przy każdym /api/sensors. */
-        bool is_finish = odometry_get().finish_detected;
+        /* Meta (czujnik Halla SS495A przez ADS1115, patrz config.h:
+         * HALL_FINISH_LOW_V/HALL_FINISH_HIGH_V): zbocze
+         * "niewykryto -> wykryto" odgrywa jingle raz, nie w pętli, i
+         * uruchamia tryb szukania obiektu cieplnego pirometrem. Sam
+         * odczyt/aktualizacja pola na dashboardzie dzieje się już w
+         * http_server przy każdym /api/sensors. */
+        bool is_finish = hall.finish_detected;
         if (is_finish && !was_finish) {
             buzzer_play_ice_cream_song_once();
             pyrometer_start_search();
@@ -142,6 +147,9 @@ void app_main(void) {
 
     if (sht40_init() != ESP_OK)
         ESP_LOGW(TAG, "SHT40 nie wykryty - kontynuuje bez temp/wilgotnosci");
+
+    if (ads1115_init() != ESP_OK)
+        ESP_LOGW(TAG, "ADS1115 (czujnik Halla mety) nie wykryty - kontynuuje bez wykrywania mety");
 
     /* LIDAR (można wyłączyć ustawiając LIDAR_ENABLED 0 w config.h). */
     lidar_init();
