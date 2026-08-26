@@ -11,7 +11,7 @@ static volatile bool s_edge_detected = false;
 static volatile line_sensor_data_t s_last_trigger = {false, false, false, false};
 static TaskHandle_t s_edge_notify_task = NULL;
 
-static inline bool is_edge_level(int gpio_num) {
+static inline bool IRAM_ATTR is_edge_level(int gpio_num) {
     return gpio_get_level(gpio_num) == 1;
 }
 

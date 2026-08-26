@@ -76,6 +76,7 @@ static float   s_cal_min_x, s_cal_max_x, s_cal_min_y, s_cal_max_y;
 
 static imu_data_t s_last = {0};
 static uint8_t    s_addr = ICM20948_ADDR;   /* stały adres z config.h        */
+static int64_t    s_yaw_last_us = 0;
 
 /* Zapis pojedynczego bajtu do rejestru układu. */
 static esp_err_t icm_write(uint8_t reg, uint8_t val) {
@@ -305,6 +306,20 @@ esp_err_t imu_read(imu_data_t *out) {
     s_last.gyro_y  = (float)to_int16(raw[8],  raw[9])  / 131.0f;
     s_last.gyro_z  = (float)to_int16(raw[10], raw[11]) / 131.0f;
     s_last.temp    = (float)to_int16(tmp[0], tmp[1]) / 333.87f + 21.0f;
+
+    /* Całkowanie prędkości kątowej z żyroskopu: gyro_z [°/s] -> rad/s,
+     * a następnie integracja w czasie daje bieżący kąt obrotu robota.
+     * Wartość jest utrzymywana w strukturze `imu_data_t` dla endpointów
+     * LiDAR i zaawansowanej nawigacji. */
+    int64_t now_us = esp_timer_get_time();
+    if (s_yaw_last_us == 0) s_yaw_last_us = now_us;
+    int64_t dt_us = now_us - s_yaw_last_us;
+    if (dt_us > 0) {
+        float dt_s = dt_us * 1.0e-6f;
+        s_last.yaw_rate_rads = s_last.gyro_z * (float)M_PI / 180.0f;
+        s_last.yaw_rad += s_last.yaw_rate_rads * dt_s;
+        s_yaw_last_us = now_us;
+    }
 
     /* Magnetometr: SLV0 w mag_init() już skonfigurowany do automatycznego
      * wczytywania ST1..ST2 do EXT_SLV_SENS_DATA_00 przy każdym cyklu

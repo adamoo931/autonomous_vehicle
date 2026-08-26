@@ -188,15 +188,20 @@ static const char *TAG = "AUTO";
  * przy przeszkodzie - szukanie szczeliny i ominięcie, a dopiero gdy się nie
  * uda - trwały stop. */
 typedef enum {
-    ST_IDLE,     // wyłączony / bezczynny
-    ST_CRUISE,   // jazda do przodu (z centrowaniem w korytarzu)
-    ST_AVOID,    // obrót w miejscu, żeby ominąć przeszkodę
-    ST_BACK,     // cofanie (po nieudanym ominięciu / utknięciu)
-    ST_BLIND,    // ślepy obrót po cofnięciu
+    ST_IDLE,        // wyłączony / bezczynny
+    ST_START,       // startowy odcinek na wprost
+    ST_ALIGN,       // wyrównanie do azymutu
+    ST_CRUISE,      // jazda do przodu (z centrowaniem w korytarzu)
+    ST_BACKUP,      // cofanie przed skanowaniem szczeliny
+    ST_SCAN_GAP,    // skanowanie i wybór szczeliny
+    ST_AVOID,       // obrót w miejscu, żeby ominąć przeszkodę
+    ST_BACK,        // cofanie (po nieudanym ominięciu / utknięciu)
+    ST_BLIND,       // ślepy obrót po cofnięciu
     ST_REMOTE_EXEC, // zdalne wykonanie ruchu (remote control)
     ST_REMOTE_WAIT, // oczekiwanie po ruchu zdalnym (zatrzymanie/kolidcja)
-    ST_REACHED,  // cel osiągnięty – stop
-    ST_FAULT     // awaria (zbyt wiele ucieczek) – stop
+    ST_STOPPED,     // zatrzymany / zakończony przejazd
+    ST_REACHED,     // cel osiągnięty – stop
+    ST_FAULT        // awaria (zbyt wiele ucieczek) – stop
 } st_t;
 
 static volatile bool s_enabled = false;
@@ -242,12 +247,17 @@ static float    s_run_energy_mwh = 0.0f;  /* energia scałkowana z odczytów INA
 static const char *state_name(st_t s) {
     switch (s) {
         case ST_IDLE:        return "Bezczynny";
+        case ST_START:       return "Start";
+        case ST_ALIGN:       return "Wyrównanie";
         case ST_CRUISE:      return "Jazda";
+        case ST_BACKUP:      return "Cofanie";
+        case ST_SCAN_GAP:    return "Skan szczeliny";
         case ST_AVOID:       return "Omijanie przeszkody";
         case ST_BACK:        return "Cofanie";
         case ST_BLIND:       return "Obrot";
         case ST_REMOTE_EXEC: return "Remote Exec";
         case ST_REMOTE_WAIT: return "Remote Wait";
+        case ST_STOPPED:     return "Zatrzymany";
         case ST_REACHED:     return "META osiagnieta";
         case ST_FAULT:       return "Awaria (utkniecie)";
         default:             return "?";

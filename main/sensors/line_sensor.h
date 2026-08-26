@@ -1,5 +1,7 @@
 #pragma once
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 /*
  * Czujniki linii CNY70 — cztery czujniki odbiciowe (po jednym w każdym rogu).
@@ -23,3 +25,9 @@ line_sensor_data_t line_sensor_read(void);
 
 /* Zwraca true, jeśli którykolwiek czujnik sygnalizuje krawędź. */
 bool line_sensor_any_edge(void);
+
+/* API używane przez autoniomę i endpoint HTTP. */
+bool line_sensor_edge_detected(void);
+void line_sensor_clear_edge_flag(void);
+line_sensor_data_t line_sensor_get_last_trigger(void);
+void line_sensor_set_notify_task(TaskHandle_t task);

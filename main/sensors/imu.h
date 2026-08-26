@@ -17,6 +17,8 @@ typedef struct {
     float mag_x,   mag_y,   mag_z;     /* pole magnetyczne [µT], osie zgodne z accel/gyro */
     float azimuth_deg;                 /* azymut (kierunek pojazdu) [0,360°), wg magnetometru */
     float temp;                        /* temperatura układu [°C]           */
+    float yaw_rad;                     /* kąt obrotu zintegrowany z żyroskopu [rad] */
+    float yaw_rate_rads;               /* bieżąca prędkość obrotu [rad/s] */
     bool  initialized;                 /* akcelerometr/żyroskop rozpoznane przy starcie */
     bool  mag_initialized;             /* magnetometr AK09916 rozpoznany przy starcie   */
 } imu_data_t;
