@@ -36,6 +36,9 @@ void autonomy_init(void);
 
 // Włącza / wyłącza tryb autonomiczny.
 void autonomy_set_enabled(bool enable);
+ 
+// Wykonaj zdalny ruch silników w trybie remote.
+bool autonomy_execute_remote_move(int pwm_left, int pwm_right, uint32_t duration_ms);
 
 // Czy autonomia jest aktualnie aktywna.
 bool autonomy_is_enabled(void);
@@ -76,3 +79,17 @@ bool autonomy_log_get(uint32_t idx, autonomy_log_rec_t *out);
 
 // Nazwa stanu dla wartości zapisanej w rekordzie (do CSV).
 const char *autonomy_log_state_name(uint8_t state);
+
+// ============================================================
+//  STATUS ZDALENYCH RUCHÓW
+//  Flagi sygnalizujące problemy napotkane podczas
+//  autonomy_execute_remote_move().
+// ============================================================
+// Zwraca true, jeśli podczas ostatniego zdalnego ruchu
+// robot wykrył kolizję z przeszkodą (LiDAR przód < 200mm
+// lub krawędź CNY70).
+bool autonomy_get_remote_collision(void);
+
+// Zwraca true, jeśli podczas ostatniego zdalnego ruchu
+// czujnik krawędzi CNY70 wykrył upadek / krawędź planszy.
+bool autonomy_get_remote_edge(void);

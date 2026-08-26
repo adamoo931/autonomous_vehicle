@@ -2,6 +2,7 @@
 #include "config.h"
 #include "motor_driver.h"
 #include "lidar.h"
+#include "line_sensor.h"
 #include "pyrometer.h"
 #include "odometry.h"
 #include "led_control.h"
@@ -101,6 +102,8 @@ typedef enum {
     ST_AVOID,    // obrót w miejscu, żeby ominąć przeszkodę
     ST_BACK,     // cofanie (po nieudanym ominięciu / utknięciu)
     ST_BLIND,    // ślepy obrót po cofnięciu
+    ST_REMOTE_EXEC, // zdalne wykonanie ruchu (remote control)
+    ST_REMOTE_WAIT, // oczekiwanie po ruchu zdalnym (zatrzymanie/kolidcja)
     ST_REACHED,  // cel osiągnięty – stop
     ST_FAULT     // awaria (zbyt wiele ucieczek) – stop
 } st_t;
@@ -108,6 +111,13 @@ typedef enum {
 static volatile bool s_enabled = false;
 static volatile st_t s_state   = ST_IDLE;
 static TaskHandle_t  s_task    = NULL;
+static volatile bool s_remote_collision = false;
+static volatile bool s_remote_edge = false;
+static volatile bool s_remote_active = false;
+static int          s_remote_left = 0;
+static int          s_remote_right = 0;
+static uint32_t     s_remote_duration = 0;
+static uint32_t     s_remote_start = 0;
 
 static uint32_t s_state_t      = 0;   // ms wejścia w bieżący stan
 static uint32_t s_progress_t   = 0;   // ms ostatniego postępu (odometria)
@@ -130,20 +140,25 @@ static bool      s_log_full_warned = false;
 // na żywo – autonomy_state_str() – i log CSV – autonomy_log_state_name()).
 static const char *state_name(st_t s) {
     switch (s) {
-        case ST_IDLE:    return "Bezczynny";
-        case ST_CRUISE:  return "Jazda";
-        case ST_AVOID:   return "Omijanie przeszkody";
-        case ST_BACK:    return "Cofanie";
-        case ST_BLIND:   return "Obrot";
-        case ST_REACHED: return "META osiagnieta";
-        case ST_FAULT:   return "Awaria (utkniecie)";
-        default:         return "?";
+        case ST_IDLE:        return "Bezczynny";
+        case ST_CRUISE:      return "Jazda";
+        case ST_AVOID:       return "Omijanie przeszkody";
+        case ST_BACK:        return "Cofanie";
+        case ST_BLIND:       return "Obrot";
+        case ST_REMOTE_EXEC: return "Remote Exec";
+        case ST_REMOTE_WAIT: return "Remote Wait";
+        case ST_REACHED:     return "META osiagnieta";
+        case ST_FAULT:       return "Awaria (utkniecie)";
+        default:             return "?";
     }
 }
 
 // ── pomocnicze ──────────────────────────────────────────────
 static inline uint32_t now_ms(void) {
     return (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+static inline int clamp(int v, int lo, int hi) {
+    return v < lo ? lo : v > hi ? hi : v;
 }
 static inline void enter(st_t s) { s_state = s; s_state_t = now_ms(); }
 
@@ -427,6 +442,49 @@ static void autonomy_task(void *arg) {
             break;
         }
 
+        case ST_REMOTE_EXEC: {
+            if (!s_remote_active) {
+                motor_set_left(s_remote_left);
+                motor_set_right(s_remote_right);
+                s_remote_start = now;
+                s_remote_active = true;
+            }
+            
+            // Monitoruj krawędź (CNY70)
+            if (line_sensor_edge_detected()) {
+                motor_stop();
+                s_remote_collision = true;
+                s_remote_edge = true;
+                ESP_LOGW(TAG, "Zdalne wykonanie: KRAWEDZ wykryta (CNY70) – stop.");
+                enter(ST_REMOTE_WAIT);
+                break;
+            }
+            
+            // Monitoruj kolizję z przodu: arc(0, 25) < 200mm
+            uint16_t front_collision_arc = arc(0, 25);
+            if (front_collision_arc != 0 && front_collision_arc < 200) {
+                motor_stop();
+                s_remote_collision = true;
+                ESP_LOGW(TAG, "Zdalne wykonanie: KOLIZJA LiDAR przód=%u mm (< 200 mm) – stop.",
+                         front_collision_arc);
+                enter(ST_REMOTE_WAIT);
+                break;
+            }
+            
+            if (now - s_remote_start >= s_remote_duration) {
+                motor_stop();
+                enter(ST_REMOTE_WAIT);
+                break;
+            }
+            break;
+        }
+
+        case ST_REMOTE_WAIT: {
+            motor_stop();
+            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            break;
+        }
+
         default:
             enter(ST_IDLE);
             break;
@@ -440,7 +498,21 @@ static void autonomy_task(void *arg) {
 void autonomy_init(void) {
     if (s_task) return;
     xTaskCreatePinnedToCore(autonomy_task, "autonomy", 4096, NULL, 6, &s_task, 1);
+    line_sensor_set_notify_task(s_task);
     ESP_LOGI(TAG, "Modul autonomii gotowy (wylaczony). Predkosc jazdy=%d%%.", SP_CRUISE);
+}
+
+bool autonomy_execute_remote_move(int pwm_left, int pwm_right, uint32_t duration_ms) {
+    if (s_state == ST_REMOTE_EXEC) return false;
+    s_remote_left = clamp(pwm_left, -100, 100);
+    s_remote_right = clamp(pwm_right, -100, 100);
+    s_remote_duration = duration_ms;
+    s_remote_collision = false;
+    s_remote_edge = false;
+    line_sensor_clear_edge_flag();
+    s_remote_active = false;
+    enter(ST_REMOTE_EXEC);
+    return true;
 }
 
 void autonomy_set_enabled(bool enable) {
@@ -480,3 +552,14 @@ bool autonomy_log_get(uint32_t idx, autonomy_log_rec_t *out) {
 }
 
 const char *autonomy_log_state_name(uint8_t state) { return state_name((st_t)state); }
+
+// ============================================================
+//  ZDALNE RUCHY – STATUS KOLIZJI
+// ============================================================
+bool autonomy_get_remote_collision(void) {
+    return s_remote_collision;
+}
+
+bool autonomy_get_remote_edge(void) {
+    return s_remote_edge;
+}

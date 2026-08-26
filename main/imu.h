@@ -5,6 +5,8 @@
 typedef struct {
     float accel_x, accel_y, accel_z;   // [g]
     float gyro_x,  gyro_y,  gyro_z;    // [°/s]
+    float yaw_rad;                     // całkowity kąt obrotu [rad]
+    float yaw_rate_rads;               // prędkość obrotu wokół osi Z [rad/s]
     float temp;                          // [°C]
     bool  initialized;
 } imu_data_t;
@@ -12,3 +14,4 @@ typedef struct {
 esp_err_t imu_init(void);
 esp_err_t imu_read(imu_data_t *out);
 imu_data_t imu_get_last(void);
+void imu_reset_yaw(void);

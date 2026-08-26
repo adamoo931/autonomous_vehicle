@@ -1,4 +1,6 @@
 matplotlib>=3.5
 numpy>=1.21
+# scipy required for ICP and linear algebra operations
+scipy>=1.10
 # tkinter jest częścią standardowej biblioteki Pythona
 # (na Linuksie może wymagać pakietu systemowego: sudo apt install python3-tk)

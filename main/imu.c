@@ -2,8 +2,10 @@
 #include "config.h"
 #include "driver/i2c.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <stdint.h>
 
 static const char *TAG = "IMU";
 
@@ -19,6 +21,7 @@ static const char *TAG = "IMU";
 #define ICM_WHO_AM_I_EXPECTED 0xEA
 
 static imu_data_t s_last = {0};
+static int64_t s_last_time_us = 0;
 static uint8_t    s_addr = ICM20948_ADDR;   // ustalany w imu_init (0x68/0x69)
 
 static esp_err_t icm_write(uint8_t reg, uint8_t val) {
@@ -68,6 +71,8 @@ static bool icm_check_addr(uint8_t addr) {
 esp_err_t imu_init(void) {
     s_last.initialized = false;
 
+    s_last_time_us = esp_timer_get_time();
+
     // Auto-wykrywanie adresu: 0x68 (AD0=GND) lub 0x69 (AD0=VCC)
     uint8_t found = 0;
     const uint8_t candidates[] = { ICM20948_ADDR, 0x68, 0x69 };
@@ -116,10 +121,25 @@ esp_err_t imu_read(imu_data_t *out) {
     s_last.gyro_x  = (float)to_int16(raw[6],  raw[7])  / 131.0f;
     s_last.gyro_y  = (float)to_int16(raw[8],  raw[9])  / 131.0f;
     s_last.gyro_z  = (float)to_int16(raw[10], raw[11]) / 131.0f;
+    int64_t now_us = esp_timer_get_time();
+    float dt = (now_us - s_last_time_us) * 1e-6f;
+    if (dt > 0.0f && dt < 0.5f) {
+        s_last.yaw_rate_rads = s_last.gyro_z * (3.14159265f / 180.0f);
+        s_last.yaw_rad += s_last.yaw_rate_rads * dt;
+    } else {
+        s_last.yaw_rate_rads = s_last.gyro_z * (3.14159265f / 180.0f);
+    }
+    s_last_time_us = now_us;
     s_last.temp    = (float)to_int16(tmp[0], tmp[1]) / 333.87f + 21.0f;
 
     if (out) *out = s_last;
     return ESP_OK;
+}
+
+void imu_reset_yaw(void) {
+    s_last.yaw_rad = 0.0f;
+    s_last.yaw_rate_rads = 0.0f;
+    s_last_time_us = esp_timer_get_time();
 }
 
 imu_data_t imu_get_last(void) { return s_last; }

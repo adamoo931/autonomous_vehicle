@@ -424,6 +424,8 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(autoj, "enabled", autonomy_is_enabled());
     cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
     cJSON_AddNumberToObject(autoj, "log_count", autonomy_log_count());
+    cJSON_AddBoolToObject(autoj, "remote_collision", autonomy_get_remote_collision());
+    cJSON_AddBoolToObject(autoj, "remote_edge", autonomy_get_remote_edge());
     cJSON_AddItemToObject(root, "autonomy", autoj);
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -564,8 +566,14 @@ static esp_err_t handle_lidar_scan(httpd_req_t *req) {
         return ESP_FAIL;
     }
 
-    int len = snprintf(buf, cap, "{\"seq\":%lu,\"rpm\":%u,\"n\":%u,\"pts\":[",
-                       (unsigned long)seq, lidar_get_speed_rpm(), n);
+    float yaw_rad = imu_get_last().yaw_rad;
+    bool edge = line_sensor_edge_detected();
+    bool collision = autonomy_get_remote_collision();
+    
+    int len = snprintf(buf, cap, 
+        "{\"seq\":%lu,\"rpm\":%u,\"yaw_rad\":%.6f,\"edge_detected\":%s,\"collision\":%s,\"n\":%u,\"pts\":[",
+                       (unsigned long)seq, lidar_get_speed_rpm(), yaw_rad,
+                       edge ? "true" : "false", collision ? "true" : "false", n);
     for (uint16_t i = 0; i < n && len < (int)cap; i++) {
         len += snprintf(buf + len, cap - len, "%s%u,%u",
                         i ? "," : "", pts[i].angle_hundredths, pts[i].distance_mm);
@@ -644,6 +652,42 @@ static esp_err_t handle_autonomy(httpd_req_t *req) {
     return ESP_OK;
 }
 
+// ── POST /api/autonomy/remote_move {"pwm_l":..,"pwm_r":..,"duration_ms":..}
+// Odpowiedź zawiera status collision i edge dla ostatniego ruchu
+static esp_err_t handle_autonomy_remote_move(httpd_req_t *req) {
+    char buf[128];
+    if (read_body(req, buf, sizeof(buf)) < 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    cJSON *j = cJSON_Parse(buf);
+    if (!j) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid json");
+        return ESP_FAIL;
+    }
+    cJSON *l = cJSON_GetObjectItem(j, "pwm_l");
+    cJSON *r = cJSON_GetObjectItem(j, "pwm_r");
+    cJSON *d = cJSON_GetObjectItem(j, "duration_ms");
+    int pwm_l = cJSON_IsNumber(l) ? (int)l->valuedouble : 0;
+    int pwm_r = cJSON_IsNumber(r) ? (int)r->valuedouble : 0;
+    uint32_t duration = cJSON_IsNumber(d) ? (uint32_t)d->valuedouble : 0;
+    bool ok = autonomy_execute_remote_move(pwm_l, pwm_r, duration);
+    cJSON_Delete(j);
+    
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", ok);
+    cJSON_AddBoolToObject(root, "accepted", ok);
+    cJSON_AddBoolToObject(root, "collision", autonomy_get_remote_collision());
+    cJSON_AddBoolToObject(root, "edge_detected", autonomy_get_remote_edge());
+    
+    char *resp = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, resp);
+    free(resp);
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
@@ -667,6 +711,7 @@ esp_err_t http_server_start(void) {
         { .uri="/api/logs/clear",     .method=HTTP_POST, .handler=handle_logs_clear },
         { .uri="/api/buzzer",         .method=HTTP_POST, .handler=handle_buzzer     },
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
+        { .uri="/api/autonomy/remote_move", .method=HTTP_POST, .handler=handle_autonomy_remote_move },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
     };
 

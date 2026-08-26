@@ -105,7 +105,7 @@ void motor_forward(uint8_t speed)  { motor_set_left( speed); motor_set_right( sp
 void motor_backward(uint8_t speed) { motor_set_left(-speed); motor_set_right(-speed); }
 void motor_turn_left(uint8_t speed)  { motor_set_left(-(speed/2)); motor_set_right( speed); }
 void motor_turn_right(uint8_t speed) { motor_set_left( speed);     motor_set_right(-(speed/2)); }
-void motor_stop(void) { motor_set_left(0); motor_set_right(0); }
+void IRAM_ATTR motor_stop(void) { motor_set_left(0); motor_set_right(0); }
 
 int motor_get_left_speed(void)  { return s_left;  }
 int motor_get_right_speed(void) { return s_right; }

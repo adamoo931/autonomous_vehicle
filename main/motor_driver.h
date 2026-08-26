@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "esp_attr.h"
 
 /**
  * Inicjalizacja sterownika silników (LEDC PWM + GPIO kierunki).
@@ -22,7 +23,7 @@ void motor_forward(uint8_t speed);   // jedź do przodu (0-100)
 void motor_backward(uint8_t speed);  // jedź do tyłu  (0-100)
 void motor_turn_left(uint8_t speed); // obrót w lewo
 void motor_turn_right(uint8_t speed);// obrót w prawo
-void motor_stop(void);               // zatrzymaj oba silniki
+void motor_stop(void);             // zatrzymaj oba silniki
 
 int  motor_get_left_speed(void);
 int  motor_get_right_speed(void);
