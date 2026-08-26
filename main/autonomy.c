@@ -58,8 +58,9 @@ static const char *TAG = "AUTO";
 
 /* Impuls rozruchowy: na początku jazdy silniki dostają krótki, mocny impuls
  * przełamujący tarcie statyczne, po czym schodzą do prędkości przelotowej. */
-#define KICK_POWER       90      /* moc impulsu rozruchowego [%] */
+#define KICK_POWER       45      /* moc impulsu rozruchowego [%] - bez gwałtownych szarpnięć */
 #define KICK_MS         150      /* czas trwania impulsu [ms] */
+#define SP_TURN          30      /* umiarkowany PWM obrotu w miejscu */
 
 /* Próg wykrycia przeszkody: swobodna przestrzeń z przodu poniżej tej
  * wartości = stop i próba ominięcia (patrz szukanie szczeliny niżej).
@@ -441,6 +442,54 @@ static void autonomy_task(void *arg) {
     (void)arg;
 
     while (1) {
+        uint32_t now = now_ms();
+
+        /* Tryb zdalny ma bezwzględny priorytet. Nie wolno tutaj gasić silników
+         * z gałęzi !s_enabled, bo Python wywołuje /api/autonomy/remote_move
+         * bez wyłączania autonomii. */
+        if (s_state == ST_REMOTE_EXEC || s_state == ST_REMOTE_WAIT) {
+            switch (s_state) {
+            case ST_REMOTE_EXEC: {
+                if (!s_remote_active) {
+                    motor_set_left(s_remote_left);
+                    motor_set_right(s_remote_right);
+                    s_remote_start = now;
+                    s_remote_active = true;
+                }
+
+                if (line_sensor_edge_detected()) {
+                    motor_stop();
+                    s_remote_collision = true;
+                    s_remote_edge = true;
+                    enter(ST_REMOTE_WAIT);
+                    break;
+                }
+
+                uint16_t front_collision_arc = arc(0, 25);
+                if (front_collision_arc != 0 && front_collision_arc < 200) {
+                    motor_stop();
+                    s_remote_collision = true;
+                    enter(ST_REMOTE_WAIT);
+                    break;
+                }
+
+                if (now - s_remote_start >= s_remote_duration) {
+                    motor_stop();
+                    enter(ST_REMOTE_WAIT);
+                    break;
+                }
+                break;
+            }
+            case ST_REMOTE_WAIT:
+                motor_stop();
+                break;
+            default:
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
+            continue;
+        }
+
         /* Tryb wyłączony: pilnuj, by silniki stały. Stan ST_STOPPED (jeśli
          * to on spowodował wyłączenie) zostaje widoczny na dashboardzie do
          * czasu ponownego włączenia autonomii - żeby było wiadomo, dlaczego
@@ -452,7 +501,6 @@ static void autonomy_task(void *arg) {
             continue;
         }
         s_stopped = false;
-        uint32_t now = now_ms();
 
         pyrometer_data_t pd  = pyrometer_get_last();
         imu_data_t       imu = imu_get_last();
@@ -725,49 +773,6 @@ static void autonomy_task(void *arg) {
             }
             break;
 
-        case ST_REMOTE_EXEC: {
-            if (!s_remote_active) {
-                motor_set_left(s_remote_left);
-                motor_set_right(s_remote_right);
-                s_remote_start = now;
-                s_remote_active = true;
-            }
-            
-            // Monitoruj krawędź (CNY70)
-            if (line_sensor_edge_detected()) {
-                motor_stop();
-                s_remote_collision = true;
-                s_remote_edge = true;
-                ESP_LOGW(TAG, "Zdalne wykonanie: KRAWEDZ wykryta (CNY70) – stop.");
-                enter(ST_REMOTE_WAIT);
-                break;
-            }
-            
-            // Monitoruj kolizję z przodu: arc(0, 25) < 200mm
-            uint16_t front_collision_arc = arc(0, 25);
-            if (front_collision_arc != 0 && front_collision_arc < 200) {
-                motor_stop();
-                s_remote_collision = true;
-                ESP_LOGW(TAG, "Zdalne wykonanie: KOLIZJA LiDAR przód=%u mm (< 200 mm) – stop.",
-                         front_collision_arc);
-                enter(ST_REMOTE_WAIT);
-                break;
-            }
-            
-            if (now - s_remote_start >= s_remote_duration) {
-                motor_stop();
-                enter(ST_REMOTE_WAIT);
-                break;
-            }
-            break;
-        }
-
-        case ST_REMOTE_WAIT: {
-            motor_stop();
-            vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
-            break;
-        }
-
         default:
             enter(ST_IDLE);
             break;
@@ -786,6 +791,7 @@ void autonomy_init(void) {
 
 bool autonomy_execute_remote_move(int pwm_left, int pwm_right, uint32_t duration_ms) {
     if (s_state == ST_REMOTE_EXEC) return false;
+
     s_remote_left = clamp(pwm_left, -100, 100);
     s_remote_right = clamp(pwm_right, -100, 100);
     s_remote_duration = duration_ms;
@@ -793,6 +799,8 @@ bool autonomy_execute_remote_move(int pwm_left, int pwm_right, uint32_t duration
     s_remote_edge = false;
     line_sensor_clear_edge_flag();
     s_remote_active = false;
+    s_stopped = false;
+    s_enabled = true;
     enter(ST_REMOTE_EXEC);
     return true;
 }

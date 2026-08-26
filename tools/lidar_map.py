@@ -137,7 +137,7 @@ class ProbabilisticMapManager:
         Update map with new scan using Bresenham raycasting.
         - scan_points: N x 2 array of (x, y) in robot frame
         - pose: [x, y, theta] in world frame
-        - edge_detected: If True, insert virtual wall 10cm ahead of robot
+        - edge_detected: If True, insert virtual wall only forward, away from robot body.
         """
         rx, ry = self.world_to_grid(pose[0], pose[1])
         c_th = math.cos(pose[2])
@@ -147,6 +147,8 @@ class ProbabilisticMapManager:
         for px, py in scan_points:
             dist = math.hypot(px, py)
             if dist < MIN_RANGE_M or dist > MAX_RANGE_M:
+                continue
+            if dist < 0.12:
                 continue
 
             # Transform to world frame
@@ -158,24 +160,24 @@ class ProbabilisticMapManager:
                 # Raycasting: free space from robot to hit point
                 line = bresenham_line(rx, ry, gx, gy)
                 for lx, ly in line[:-1]:
-                    if self.is_in_bounds(lx, ly) and self.raw_grid[ly, lx] != 100:
+                    if self.is_in_bounds(lx, ly) and (lx, ly) != (rx, ry) and self.raw_grid[ly, lx] != 100:
                         self.raw_grid[ly, lx] = 0
                 # Mark hit point as obstacle
-                self.raw_grid[gy, gx] = 100
+                if (gx, gy) != (rx, ry):
+                    self.raw_grid[gy, gx] = 100
 
-        # VIRTUAL WALL: Jeśli czujnik krawędzi zadziałał, wstaw wirtualną ścianę
+        # VIRTUAL WALL: tylko na przodzie, co najmniej 18 cm i bez pokrycia z robotem
         if edge_detected:
-            # Linia 10cm = 2 komórki przed robotem
-            wall_dist_cells = 2
-            wall_x = rx + int(wall_dist_cells * c_th)
-            wall_y = ry + int(wall_dist_cells * s_th)
-            if self.is_in_bounds(wall_x, wall_y):
-                # Zaznacz szeroki pas (10cm buffer) jako ścianę
+            wall_dist_m = 0.18
+            wall_x = pose[0] + math.cos(pose[2]) * wall_dist_m
+            wall_y = pose[1] + math.sin(pose[2]) * wall_dist_m
+            wx, wy = self.world_to_grid(wall_x, wall_y)
+            if self.is_in_bounds(wx, wy) and (wx, wy) != (rx, ry):
                 for dx in range(-1, 2):
                     for dy in range(-1, 2):
-                        wx, wy = wall_x + dx, wall_y + dy
-                        if self.is_in_bounds(wx, wy):
-                            self.raw_grid[wy, wx] = 100
+                        nx, ny = wx + dx, wy + dy
+                        if self.is_in_bounds(nx, ny) and (nx, ny) != (rx, ry):
+                            self.raw_grid[ny, nx] = 100
 
     def get_occupied_points(self, max_points: int = 3000) -> np.ndarray:
         """Get random sample of obstacle points for ICP."""
@@ -477,7 +479,8 @@ class AutonomousWorker(threading.Thread):
 
     def _check_proximity_guard(self, scan_local_pts: np.ndarray) -> Tuple[bool, float]:
         """
-        Proximity Guard: sprawdza odległość w układzie lokalnym robota (X=przód, Y=lewo).
+        Proximity Guard w układzie robota: sprawdzamy tylko punkty z przodu
+        (|atan2(y,x)| <= 35°), a nie punkty w układzie świata.
         """
         if len(scan_local_pts) == 0:
             return True, 10.0
@@ -488,8 +491,6 @@ class AutonomousWorker(threading.Thread):
             if dist == 0:
                 continue
             angle_rad = math.atan2(py, px)
-
-            # Stożek przedni ±35° (0 rad = prosto przed robotem)
             if abs(angle_rad) <= PROXIMITY_GUARD_ANGLE:
                 if dist < min_dist:
                     min_dist = dist
@@ -499,27 +500,28 @@ class AutonomousWorker(threading.Thread):
         return True, min_dist
 
     def run(self) -> None:
-        """Main navigation loop."""
+        """Main navigation loop, sequenced as STOP -> SCAN -> PLAN -> EXECUTE -> SETTLE."""
         while self.running:
-            # 1. FULL SCAN: Get complete 360° LiDAR rotation
+            if self.goal_world is None or not self.nav_enabled:
+                time.sleep(0.08)
+                continue
+
+            # 1. STOP & SCAN
             data = self._http_get("/api/lidar/scan?since=0")
             if not data or "pts" not in data:
                 time.sleep(0.1)
                 continue
 
             pts_raw = data.get("pts", [])
-            edge_detected = data.get("edge_detected", False)
-            collision = data.get("collision", False)
-
+            edge_detected = bool(data.get("edge_detected", False))
+            collision = bool(data.get("collision", False))
             if len(pts_raw) < 20:
                 time.sleep(0.08)
                 continue
 
-            # Parse LiDAR points: format = [angle_hundredths, distance_mm, ...]
-            arr = np.array(pts_raw, dtype=np.float64).reshape(-1, 2)
-            angles = -(arr[:, 0] / 100.0 * math.pi / 180.0)  # CW -> CCW
-            dists = arr[:, 1] / 1000.0  # mm -> m
-
+            arr = np.asarray(pts_raw, dtype=np.float64).reshape(-1, 2)
+            angles = -(arr[:, 0] / 100.0 * math.pi / 180.0)
+            dists = arr[:, 1] / 1000.0
             valid_mask = (dists >= MIN_RANGE_M) & (dists <= MAX_RANGE_M)
             if np.count_nonzero(valid_mask) < 15:
                 time.sleep(0.08)
@@ -530,124 +532,78 @@ class AutonomousWorker(threading.Thread):
             scan_pts = np.vstack((np.cos(angles) * dists, np.sin(angles) * dists)).T
 
             map_pts = self.map_mgr.get_occupied_points()
-
-            # 2. LOCALIZATION & MAP UPDATE
             if not self.bootstrapped or len(map_pts) < 30:
-                # Bootstrap: first frame
                 self.map_mgr.update_from_scan(scan_pts, self.pose, edge_detected)
                 self.last_keyframe_pose = self.pose.copy()
                 self.bootstrapped = True
                 is_valid, rmse, ratio = True, 0.0, 1.0
                 self.state_msg = "BOOTSTRAPPING..."
             else:
-                # Localize using robust localizer
                 origin = (self.map_mgr.origin_x, self.map_mgr.origin_y)
                 new_pose, is_valid, rmse, ratio = self.localizer.localize(
                     scan_pts, map_pts, self.map_mgr.raw_grid, origin,
                     self.map_mgr.cell_size, self.pose
                 )
-
                 if is_valid:
                     self.pose = new_pose
                     d_trans = np.linalg.norm(self.pose[:2] - self.last_keyframe_pose[:2])
                     d_rot = abs((self.pose[2] - self.last_keyframe_pose[2] + math.pi) % (2 * math.pi) - math.pi)
-
-                    # Keyframe: update map when moved enough
                     if d_trans >= KEYFRAME_MIN_DIST or d_rot >= KEYFRAME_MIN_ANGLE:
                         self.map_mgr.update_from_scan(scan_pts, self.pose, edge_detected)
                         self.last_keyframe_pose = self.pose.copy()
                     self.state_msg = "SLAM OK"
                 else:
-                    self.state_msg = f"ICP REJECTED (RMSE={rmse:.3f}m,ratio={ratio:.2f})"
+                    self.state_msg = f"ICP REJECTED (RMSE={rmse:.3f}m, ratio={ratio:.2f})"
 
-            # Transform scan to world frame for visualization
             self.last_scan_world = self.localizer.transform_points(scan_pts, self.pose)
 
-            # 3. STOP-AND-GO NAVIGATION
-            if self.goal_world is not None and self.nav_enabled and is_valid:
-                start_c = self.map_mgr.world_to_grid(self.pose[0], self.pose[1])
-                goal_c = self.map_mgr.world_to_grid(self.goal_world[0], self.goal_world[1])
-                self.path_cells = self.planner.plan(start_c, goal_c)
+            start_c = self.map_mgr.world_to_grid(self.pose[0], self.pose[1])
+            goal_c = self.map_mgr.world_to_grid(self.goal_world[0], self.goal_world[1])
+            self.path_cells = self.planner.plan(start_c, goal_c)
 
+            if self.goal_world is not None:
                 dist_to_goal = float(np.linalg.norm(self.pose[:2] - self.goal_world))
                 if dist_to_goal < 0.25:
                     self.state_msg = "GOAL REACHED!"
                     self.nav_enabled = False
-                elif len(self.path_cells) >= 2:
-                    # PROXIMITY GUARD CHECK na lokalnej chmurze (scan_pts, NIE last_scan_world)
-                    is_clear, min_dist = self._check_proximity_guard(scan_pts)
+                    self.path_cells = []
+                    time.sleep(0.08)
+                    continue
 
-                    if not is_clear:
-                        # Przeszkoda blisko - wywołaj procedurę korekcyjną (szukanie wolnego sektora)
-                        self.state_msg = f"PROXIMITY GUARD: dist={min_dist:.2f}m < {PROXIMITY_GUARD_M}m, correcting..."
-                        best_angle = None
-                        best_clear = False
-                        
-                        # Przeszukuj okno kątowe (-70° do +70°) względem przodu robota
-                        for test_angle in np.linspace(-math.radians(70), math.radians(70), 15):
-                            test_clear = True
-                            for px, py in scan_pts:
-                                dist = math.hypot(px, py)
-                                rel_angle = math.atan2(py, px) # 0 = przód robota
-                                angle_err = (rel_angle - test_angle + math.pi) % (2 * math.pi) - math.pi
-                                if abs(angle_err) <= PROXIMITY_GUARD_ANGLE and dist < PROXIMITY_GUARD_M:
-                                    test_clear = False
-                                    break
-                            if test_clear:
-                                best_angle = test_angle
-                                best_clear = True
-                                break
+            # 2. PLAN
+            if len(self.path_cells) < 2:
+                self.state_msg = "NO PATH AVAILABLE"
+                time.sleep(0.12)
+                continue
 
-                        if best_clear:
-                            # Znaleziono wolny sektor - obrót w miejscu
-                            turn_speed = 30 if best_angle > 0 else -30
-                            payload = {"pwm_l": -turn_speed, "pwm_r": turn_speed, "duration_ms": 180}
-                            self._http_post("/api/autonomy/remote_move", payload)
-                            time.sleep(0.18 + 0.1)
-                        else:
-                            # Brak wolnego sektora z przodu - cofanie
-                            payload = {"pwm_l": -30, "pwm_r": -30, "duration_ms": 220}
-                            self._http_post("/api/autonomy/remote_move", payload)
-                            time.sleep(0.22 + 0.1)
-                    else:
-                        # Ścieżka jest wolna - kontynuuj nawigację A* (wybór celu 6 kroków przed)
-                        target_idx = min(6, len(self.path_cells) - 1)
-                        target_cell = self.path_cells[target_idx]
-                        target_wx, target_wy = self.map_mgr.grid_to_world(*target_cell)
+            target_cell = self.path_cells[min(6, len(self.path_cells) - 1)]
+            target_wx, target_wy = self.map_mgr.grid_to_world(*target_cell)
+            target_angle = math.atan2(target_wy - self.pose[1], target_wx - self.pose[0])
+            angle_err = (target_angle - self.pose[2] + math.pi) % (2 * math.pi) - math.pi
 
-                        delta_x = target_wx - self.pose[0]
-                        delta_y = target_wy - self.pose[1]
-                        target_angle = math.atan2(delta_y, delta_x)
-                        angle_err = (target_angle - self.pose[2] + math.pi) % (2 * math.pi) - math.pi
+            # 3. EXECUTE STEP
+            is_clear, min_dist = self._check_proximity_guard(scan_pts)
+            if not is_clear:
+                self.state_msg = f"PROXIMITY GUARD: dist={min_dist:.2f}m < {PROXIMITY_GUARD_M}m"
+                payload = {"pwm_l": -30, "pwm_r": -30, "duration_ms": 220}
+                self._http_post("/api/autonomy/remote_move", payload)
+                time.sleep(0.22 + 0.1)
+                continue
 
-                        if abs(angle_err) > math.radians(16.0):
-                            # Wymagany obrót w stronę wezła
-                            turn_dir = 1 if angle_err > 0 else -1
-                            payload = {"pwm_l": -turn_dir * 35, "pwm_r": turn_dir * 35, "duration_ms": 220}
-                            self._http_post("/api/autonomy/remote_move", payload)
-                            self.state_msg = f"NAVIGATING: Rotating {math.degrees(angle_err):.0f}°"
-                            time.sleep(0.22 + 0.1)
-                        else:
-                            # Otwarta droga do przodu
-                            payload = {"pwm_l": 40, "pwm_r": 40, "duration_ms": 380}
-                            self._http_post("/api/autonomy/remote_move", payload)
-                            self.state_msg = f"NAVIGATING: Moving forward (dist to goal: {dist_to_goal:.2f}m)"
-                            time.sleep(0.38 + 0.1)
-                else:
-                    self.state_msg = "NO PATH AVAILABLE"
-
-            elif self.goal_world is not None and not self.nav_enabled:
-                # Goal set but navigation disabled - just plan
-                start_c = self.map_mgr.world_to_grid(self.pose[0], self.pose[1])
-                goal_c = self.map_mgr.world_to_grid(self.goal_world[0], self.goal_world[1])
-                self.path_cells = self.planner.plan(start_c, goal_c)
-                self.state_msg = f"READY (goal set, {len(self.path_cells)} waypoints)"
+            if abs(angle_err) > math.radians(15.0):
+                turn_dir = 1 if angle_err > 0 else -1
+                payload = {"pwm_l": -turn_dir * 30, "pwm_r": turn_dir * 30, "duration_ms": 180}
+                self._http_post("/api/autonomy/remote_move", payload)
+                self.state_msg = f"ROTATING: {math.degrees(angle_err):.0f}°"
             else:
-                self.path_cells = []
+                payload = {"pwm_l": 35, "pwm_r": 35, "duration_ms": 280}
+                self._http_post("/api/autonomy/remote_move", payload)
+                self.state_msg = f"STEP FORWARD: dist_to_goal={float(np.linalg.norm(self.pose[:2] - self.goal_world)):.2f}m"
 
-            # 4. PUBLISH SNAPSHOT
+            # 4. SETTLE
+            time.sleep(0.10)
+
             path_pts = [self.map_mgr.grid_to_world(*c) for c in self.path_cells]
-
             snapshot = {
                 "pose": self.pose.copy(),
                 "map_image": self.map_mgr.to_image(),
@@ -659,7 +615,7 @@ class AutonomousWorker(threading.Thread):
                 "inlier_ratio": ratio,
                 "state_msg": self.state_msg,
                 "edge_detected": edge_detected,
-                "collision": collision
+                "collision": collision,
             }
 
             if self.out_queue.full():
