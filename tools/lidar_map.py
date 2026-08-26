@@ -1,396 +1,847 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-lidar_map.py – Desktopowy podgląd mapy przeszkód z lidaru robota.
+Autonomous Vehicle Navigation Brain – Enhanced SLAM + Stop-and-Go Navigation
+with Proximity Guard, Virtual Wall Detection, and Robust ICP with Quality Gating.
 
-Aplikacja łączy się z firmware ESP32 (tym samym, co serwuje dashboard WWW)
-przez endpoint HTTP  GET /api/lidar/scan?since=N  i na bieżąco buduje mapę
-przeszkód na wykresie punktowym.
-
-Zasada mapowania (zgodnie z wymaganiem):
-  • Pokazywane są TYLKO BIEŻĄCE przeszkody – każdy odczyt zastępuje poprzedni
-    (najnowszy ~1 obrót lidaru). Dzięki temu obracający się/jadący robot NIE
-    tworzy już skumulowanego miszmaszu – widać to, co lidar widzi teraz.
-  • Przestrzeń jest dzielona na kwadratową siatkę o boku CELL (domyślnie 5 cm).
-  • Każda zajęta komórka 5×5 cm = JEDNA czarna kropka na mapie.
-  • Dzięki temu sześcian 5×5 cm to 1 kropka, a przedmiot 5×30 cm to 6 kropek
-    (liczy się tylko szerokość i długość rzutowane na podłogę – wysokość jest
-    nieistotna, bo lidar i tak skanuje w jednej płaszczyźnie).
-  • Ściana = ciąg sąsiednich zajętych komórek = linia kropek.
-
-Obsługa:
-  • Wpisz adres IP robota (ten sam, pod którym działa dashboard), kliknij START.
-  • Mapa pokazuje wyłącznie aktualny skan i odświeża się na bieżąco – idealne
-    do weryfikacji, czy ściany/przeszkody rysują się poprawnie pod aktualnym
-    położeniem i orientacją robota.
-  • Suwaki/pola pozwalają dobrać rozmiar komórki, zasięg i orientację (offset kąta).
-
-Wymagania:  Python 3.8+,  matplotlib,  numpy   (tkinter jest w standardzie).
-    pip install -r requirements.txt
+Cechy:
+- Stabilny SLAM w World Frame (CSM + ICP z ograniczonym kątem poszukiwania)
+- Gating jakości: RMSE <= 0.085m, inlier ratio >= 0.35
+- Wirtualne ściany z czujników krawędzi (CNY70)
+- Dylatacja przeszkód (strefa 10cm bezpieczeństwa)
+- Optymistyczny A* z karą za nieznane obszary
+- Stop-and-Go z Proximity Guard (min 20cm / 0.2m do przeszkód)
 """
 
 import json
 import math
+import queue
 import threading
 import time
 import urllib.request
-from urllib.error import URLError
+import urllib.error
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk
 
 import numpy as np
-import matplotlib
-matplotlib.use("TkAgg")
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import (
-    FigureCanvasTkAgg, NavigationToolbar2Tk,
-)
+from scipy.linalg import svd
+from scipy.ndimage import binary_dilation
+from scipy.spatial import cKDTree
 
-# ── Ustawienia domyślne ──────────────────────────────────────────────
-DEFAULT_HOST       = "192.168.4.1"   # typowy adres ESP32 (SoftAP) – zmień na swój
-DEFAULT_CELL_MM    = 50              # bok komórki siatki [mm]  → 5 cm = 1 kropka
-DEFAULT_MAX_RANGE  = 6.0             # maks. zasięg rysowania [m]
-DEFAULT_MIN_RANGE  = 0.05            # minimalna sensowna odległość [m] (filtr szumu)
-POLL_INTERVAL_S    = 0.08            # odstęp między zapytaniami HTTP
-HTTP_TIMEOUT_S     = 1.5             # timeout pojedynczego zapytania
-REDRAW_INTERVAL_MS = 150             # odświeżanie wykresu (GUI)
+# ============================================================================
+# KONFIGURACJA PARAMETRÓW
+# ============================================================================
+DEFAULT_HOST = "192.168.137.51"  # IP modułu ESP32
+CELL_SIZE_M = 0.05               # 5 cm na komórkę
+GRID_WIDTH = 401                 # 401 x 0.05m = 20.05 m
+GRID_HEIGHT = 401
+MAX_RANGE_M = 5.5                # Zasięg LiDARu
+MIN_RANGE_M = 0.08               # Martwa strefa
 
+HTTP_TIMEOUT_S = 0.8
+UI_REFRESH_MS = 40
 
-class LidarClient:
-    """Wątek odpytujący firmware i akumulujący punkty w siatce zajętości."""
+# Progi ICP i keyframes
+ICP_MAX_CORR_DIST = 0.22         # Promień korespondencji [m]
+ICP_MAX_RMSE = 0.085             # Max RMSE dla akceptacji
+ICP_MIN_INLIER_RATIO = 0.35      # Min odsetek inlierów
+ICP_MIN_INLIERS = 20
+KEYFRAME_MIN_DIST = 0.08         # Min trans. do keyframe'a
+KEYFRAME_MIN_ANGLE = math.radians(6.0)
 
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._thread = None
-        self._stop = threading.Event()
+# Bezpieczeństwo i dylatacja
+ROBOT_SAFETY_RADIUS_CELLS = 2    # 10 cm bufora
+PROXIMITY_GUARD_M = 0.20         # 20 cm próg minimalnej odległości
+PROXIMITY_GUARD_ANGLE = math.radians(35)  # Stożek przodu (±35°)
 
-        # Konfiguracja (czytana/zmieniana z wątku GUI – chroniona lockiem).
-        self.host = DEFAULT_HOST
-        self.cell_mm = DEFAULT_CELL_MM
-        self.max_range_mm = DEFAULT_MAX_RANGE * 1000.0
-        self.min_range_mm = DEFAULT_MIN_RANGE * 1000.0
-        self.angle_offset_deg = 0.0
-        self.invert_dir = False
+# Kolory wizualizacji
+COLOR_ROBOT = "#ef476f"
+COLOR_PATH = "#ffd166"
+COLOR_SCAN = "#06d6a0"
+COLOR_GOAL = "#ffb703"
 
-        # Stan mapy (TYLKO bieżący skan – bez akumulacji).
-        self.cells = set()           # komórki zajęte w AKTUALNYM skanie (ix, iy)
-        self.last_scan = []          # surowe punkty aktualnego skanu [(x_mm, y_mm), ...]
-        self.seq = 0                 # ostatni numer sekwencyjny (do statusu)
-        self.rpm = 0
-        self.connected = False
-        self.last_error = ""
-        self.n_points = 0            # liczba punktów w bieżącym skanie
-        self.pps = 0.0                # punktów/s (tempo napływu danych z lidaru)
-        self._last_ingest_t = None    # do liczenia pps (czas poprzedniego _ingest)
-
-    # ── sterowanie wątkiem ──────────────────────────────────────────
-    def start(self):
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        with self._lock:
-            self.connected = False
-
-    def reset_map(self):
-        # W trybie bieżącym mapa i tak odświeża się sama; RESET po prostu
-        # natychmiast czyści widok do następnego skanu.
-        with self._lock:
-            self.cells = set()
-            self.last_scan = []
-            self.n_points = 0
-
-    # ── aktualizacja konfiguracji (z GUI) ───────────────────────────
-    def configure(self, **kw):
-        with self._lock:
-            for k, v in kw.items():
-                setattr(self, k, v)
-
-    # ── migawka stanu do rysowania ──────────────────────────────────
-    def snapshot(self):
-        with self._lock:
-            cell = self.cell_mm
-            # Środki zajętych komórek BIEŻĄCEGO skanu [m].
-            if self.cells:
-                arr = np.array(list(self.cells), dtype=np.float64)
-                grid_xy = (arr + 0.5) * cell / 1000.0
-            else:
-                grid_xy = np.empty((0, 2))
-            live = (np.array(self.last_scan, dtype=np.float64) / 1000.0
-                    if self.last_scan else np.empty((0, 2)))
-            return {
-                "grid": grid_xy,
-                "live": live,
-                "rpm": self.rpm,
-                "connected": self.connected,
-                "n_cells": len(self.cells),
-                "n_points": self.n_points,
-                "pps": self.pps,
-                "error": self.last_error,
-            }
-
-    # ── pętla robocza ───────────────────────────────────────────────
-    def _run(self):
-        while not self._stop.is_set():
-            t0 = time.time()
-            try:
-                with self._lock:
-                    host = self.host
-                # since=0 => firmware zwraca NAJNOWSZE ~512 punktów (≈1 obrót),
-                # czyli zawsze aktualny pełny skan – bez akumulacji historii.
-                url = f"http://{host}/api/lidar/scan?since=0"
-                with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_S) as r:
-                    data = json.loads(r.read().decode("utf-8"))
-                self._ingest(data)
-                with self._lock:
-                    self.connected = True
-                    self.last_error = ""
-            except (URLError, OSError, ValueError, json.JSONDecodeError) as e:
-                with self._lock:
-                    self.connected = False
-                    self.last_error = str(e)
-                time.sleep(0.4)      # po błędzie nie zalewaj zapytaniami
-
-            dt = time.time() - t0
-            if dt < POLL_INTERVAL_S:
-                self._stop.wait(POLL_INTERVAL_S - dt)
-
-    # ── przetworzenie odpowiedzi: TYLKO bieżący skan ────────────────
-    def _ingest(self, data):
-        pts = data.get("pts", [])
-        seq = int(data.get("seq", 0))
-        rpm = int(data.get("rpm", 0))
-
-        with self._lock:
-            cell = self.cell_mm
-            off = math.radians(self.angle_offset_deg)
-            sign = -1.0 if self.invert_dir else 1.0
-            max_r = self.max_range_mm
-            min_r = self.min_range_mm
-
-            fresh = []
-            cells = set()
-            # pts to spłaszczona tablica: [a0, d0, a1, d1, ...]
-            for i in range(0, len(pts) - 1, 2):
-                ang_h = pts[i]
-                dist = pts[i + 1]
-                if dist <= 0 or dist < min_r or dist > max_r:
-                    continue
-                theta = sign * (ang_h / 100.0) * math.pi / 180.0 + off
-                x = dist * math.cos(theta)
-                y = dist * math.sin(theta)
-                fresh.append((x, y))
-                cells.add((math.floor(x / cell), math.floor(y / cell)))
-
-            # ZASTĘPUJEMY (nie akumulujemy) – pokazujemy tylko to, co teraz.
-            self.last_scan = fresh
-            self.cells = cells
-            self.n_points = len(fresh)
-            self.seq = seq
-            self.rpm = rpm
-
-            # Tempo napływu danych [pkt/s] – wygładzone (EMA), żeby liczba
-            # w statusie nie skakała przy każdym odczycie.
-            now_t = time.time()
-            if self._last_ingest_t is not None:
-                dt = now_t - self._last_ingest_t
-                if dt > 0:
-                    inst_pps = len(fresh) / dt
-                    self.pps = 0.7 * self.pps + 0.3 * inst_pps
-            self._last_ingest_t = now_t
-
-    # ── eksport BIEŻĄCEGO skanu do CSV (środki komórek, metry) ──────
-    def export_csv(self, path):
-        with self._lock:
-            cell = self.cell_mm
-            cells = list(self.cells)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write("x_m,y_m\n")
-            for ix, iy in cells:
-                f.write(f"{(ix + 0.5) * cell / 1000.0:.3f},"
-                        f"{(iy + 0.5) * cell / 1000.0:.3f}\n")
-        return len(cells)
+# ============================================================================
+# ALGORYTMY GEOMETRYCZNE
+# ============================================================================
+def bresenham_line(x0: int, y0: int, x1: int, y1: int) -> List[Tuple[int, int]]:
+    """Generuje listę komórek na odcinku (x0, y0) -> (x1, y1)."""
+    points: List[Tuple[int, int]] = []
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    x, y = x0, y0
+    sx = 1 if x0 < x1 else -1
+    sy = 1 if y0 < y1 else -1
+    if dx > dy:
+        err = dx / 2.0
+        while x != x1:
+            points.append((x, y))
+            err -= dy
+            if err < 0:
+                y += sy
+                err += dx
+            x += sx
+    else:
+        err = dy / 2.0
+        while y != y1:
+            points.append((x, y))
+            err -= dx
+            if err < 0:
+                x += sx
+                err += dy
+            y += sy
+    points.append((x1, y1))
+    return points
 
 
-class App:
-    def __init__(self, root):
-        self.root = root
-        self.client = LidarClient()
-        root.title("Mapa przeszkód – LIDAR")
-        root.geometry("1080x760")
-
-        self._build_controls()
-        self._build_plot()
-        self._schedule_redraw()
-
-    # ── panel sterowania ────────────────────────────────────────────
-    def _build_controls(self):
-        bar = ttk.Frame(self.root, padding=8)
-        bar.pack(side=tk.TOP, fill=tk.X)
-
-        ttk.Label(bar, text="Adres robota:").grid(row=0, column=0, sticky="w")
-        self.host_var = tk.StringVar(value=DEFAULT_HOST)
-        ttk.Entry(bar, textvariable=self.host_var, width=16).grid(row=0, column=1, padx=4)
-
-        self.start_btn = ttk.Button(bar, text="▶ START", command=self.toggle)
-        self.start_btn.grid(row=0, column=2, padx=4)
-        ttk.Button(bar, text="🗑 RESET mapy", command=self.reset).grid(row=0, column=3, padx=4)
-        ttk.Button(bar, text="💾 Eksport CSV", command=self.export).grid(row=0, column=4, padx=4)
-        ttk.Button(bar, text="⊡ Dopasuj widok", command=self.fit_view).grid(row=0, column=5, padx=4)
-
-        # Drugi rząd – parametry.
-        self.cell_var   = tk.IntVar(value=DEFAULT_CELL_MM)
-        self.range_var  = tk.DoubleVar(value=DEFAULT_MAX_RANGE)
-        self.offset_var = tk.DoubleVar(value=0.0)
-        self.invert_var = tk.BooleanVar(value=False)
-        self.live_var   = tk.BooleanVar(value=True)
-
-        ttk.Label(bar, text="Komórka [mm]:").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Spinbox(bar, from_=10, to=500, increment=5, width=6,
-                    textvariable=self.cell_var, command=self.apply_cfg
-                    ).grid(row=1, column=1, sticky="w", pady=(6, 0))
-
-        ttk.Label(bar, text="Zasięg [m]:").grid(row=1, column=2, sticky="e", pady=(6, 0))
-        ttk.Spinbox(bar, from_=0.5, to=30, increment=0.5, width=6,
-                    textvariable=self.range_var, command=self.apply_cfg
-                    ).grid(row=1, column=3, sticky="w", pady=(6, 0))
-
-        ttk.Label(bar, text="Offset kąta [°]:").grid(row=1, column=4, sticky="e", pady=(6, 0))
-        ttk.Spinbox(bar, from_=-180, to=180, increment=1, width=6,
-                    textvariable=self.offset_var, command=self.apply_cfg
-                    ).grid(row=1, column=5, sticky="w", pady=(6, 0))
-
-        ttk.Checkbutton(bar, text="Odwróć kierunek", variable=self.invert_var,
-                        command=self.apply_cfg).grid(row=1, column=6, padx=8, pady=(6, 0))
-        ttk.Checkbutton(bar, text="Pokaż bieżący skan", variable=self.live_var
-                        ).grid(row=1, column=7, padx=4, pady=(6, 0))
-
-        # Pasek statusu.
-        self.status = ttk.Label(self.root, text="● Rozłączono", padding=(8, 4))
-        self.status.pack(side=tk.BOTTOM, fill=tk.X)
-
-    # ── wykres ──────────────────────────────────────────────────────
-    def _build_plot(self):
-        self.fig = Figure(figsize=(7, 6), dpi=100)
-        self.ax = self.fig.add_subplot(111)
-        self.ax.set_aspect("equal", adjustable="box")
-        self.ax.set_facecolor("#fafafa")
-        self.ax.grid(True, color="#e0e0e0", linewidth=0.5)
-        self.ax.set_xlabel("X [m]  (przód robota →)")
-        self.ax.set_ylabel("Y [m]  (← lewo)")
-        self.ax.set_title("Bieżące przeszkody (każda kropka = zajęta komórka 5 cm)")
-
-        r = DEFAULT_MAX_RANGE
-        self.ax.set_xlim(-r, r)
-        self.ax.set_ylim(-r, r)
-
-        # Warstwy: bieżące przeszkody (czarne komórki) + surowy skan (niebieskie).
-        self.grid_sc = self.ax.scatter([], [], s=10, c="black", marker="o",
-                                       label="przeszkody 5 cm (teraz)")
-        self.live_sc = self.ax.scatter([], [], s=6, c="#3a86ff", alpha=0.45,
-                                       label="surowy skan")
-        # Robot w środku układu + strzałka kierunku.
-        self.ax.plot(0, 0, marker="^", color="#e63946", markersize=12, zorder=5)
-        self.ax.annotate("", xy=(0.5, 0), xytext=(0, 0),
-                         arrowprops=dict(arrowstyle="->", color="#e63946", lw=1.5))
-        self.ax.legend(loc="upper right", fontsize=8)
-
-        wrap = ttk.Frame(self.root)
-        wrap.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=wrap)
-        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        NavigationToolbar2Tk(self.canvas, wrap)  # zoom/pan/zapis PNG
-
-    # ── akcje ───────────────────────────────────────────────────────
-    def toggle(self):
-        if self.client._thread and self.client._thread.is_alive():
-            self.client.stop()
-            self.start_btn.config(text="▶ START")
-        else:
-            self.apply_cfg()
-            self.client.configure(host=self.host_var.get().strip())
-            self.client.start()
-            self.start_btn.config(text="⏸ STOP")
-
-    def reset(self):
-        self.client.reset_map()
-
-    def apply_cfg(self):
-        try:
-            cell = max(5, int(self.cell_var.get()))
-            rng = max(0.2, float(self.range_var.get()))
-            off = float(self.offset_var.get())
-        except (tk.TclError, ValueError):
-            return
-        self.client.configure(
-            cell_mm=cell,
-            max_range_mm=rng * 1000.0,
-            angle_offset_deg=off,
-            invert_dir=bool(self.invert_var.get()),
+# ============================================================================
+# PROBABILISTIC MAP MANAGER
+# ============================================================================
+class ProbabilisticMapManager:
+    """
+    Occupancy Grid (401x401 cells, cell_size=0.05m).
+    -1: Unknown (exploration), 0: Free space, 100: Obstacles (walls)
+    """
+    def __init__(self, width: int, height: int, cell_size: float) -> None:
+        self.width = width
+        self.height = height
+        self.cell_size = cell_size
+        # -1: unknown, 0: free, 100: obstacle
+        self.raw_grid = np.full((height, width), -1, dtype=np.int8)
+        self.origin_x = width // 2
+        self.origin_y = height // 2
+        self.inflation_struct = np.ones(
+            (2 * ROBOT_SAFETY_RADIUS_CELLS + 1, 2 * ROBOT_SAFETY_RADIUS_CELLS + 1), dtype=bool
         )
 
-    def fit_view(self):
-        snap = self.client.snapshot()
-        pts = snap["grid"]
-        if len(pts) == 0:
-            r = float(self.range_var.get())
-            self.ax.set_xlim(-r, r)
-            self.ax.set_ylim(-r, r)
-        else:
-            m = 0.3
-            self.ax.set_xlim(pts[:, 0].min() - m, pts[:, 0].max() + m)
-            self.ax.set_ylim(pts[:, 1].min() - m, pts[:, 1].max() + m)
-        self.canvas.draw_idle()
+    def world_to_grid(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert world coordinates to grid indices."""
+        ix = int(math.floor(x / self.cell_size)) + self.origin_x
+        iy = int(math.floor(y / self.cell_size)) + self.origin_y
+        return ix, iy
 
-    def export(self):
-        path = filedialog.asksaveasfilename(
-            defaultextension=".csv",
-            filetypes=[("CSV", "*.csv")],
-            title="Zapisz mapę przeszkód")
-        if not path:
+    def grid_to_world(self, ix: int, iy: int) -> Tuple[float, float]:
+        """Convert grid indices to world coordinates."""
+        x = (ix - self.origin_x + 0.5) * self.cell_size
+        y = (iy - self.origin_y + 0.5) * self.cell_size
+        return x, y
+
+    def is_in_bounds(self, ix: int, iy: int) -> bool:
+        """Check if grid index is within bounds."""
+        return 0 <= ix < self.width and 0 <= iy < self.height
+
+    def update_from_scan(self, scan_points: np.ndarray, pose: np.ndarray,
+                        edge_detected: bool = False) -> None:
+        """
+        Update map with new scan using Bresenham raycasting.
+        - scan_points: N x 2 array of (x, y) in robot frame
+        - pose: [x, y, theta] in world frame
+        - edge_detected: If True, insert virtual wall 10cm ahead of robot
+        """
+        rx, ry = self.world_to_grid(pose[0], pose[1])
+        c_th = math.cos(pose[2])
+        s_th = math.sin(pose[2])
+
+        # Ustaw wolną przestrzeń wzdłuż promieni + zaznacz przeszkody
+        for px, py in scan_points:
+            dist = math.hypot(px, py)
+            if dist < MIN_RANGE_M or dist > MAX_RANGE_M:
+                continue
+
+            # Transform to world frame
+            wx = pose[0] + c_th * px - s_th * py
+            wy = pose[1] + s_th * px + c_th * py
+            gx, gy = self.world_to_grid(wx, wy)
+
+            if self.is_in_bounds(gx, gy):
+                # Raycasting: free space from robot to hit point
+                line = bresenham_line(rx, ry, gx, gy)
+                for lx, ly in line[:-1]:
+                    if self.is_in_bounds(lx, ly) and self.raw_grid[ly, lx] != 100:
+                        self.raw_grid[ly, lx] = 0
+                # Mark hit point as obstacle
+                self.raw_grid[gy, gx] = 100
+
+        # VIRTUAL WALL: Jeśli czujnik krawędzi zadziałał, wstaw wirtualną ścianę
+        if edge_detected:
+            # Linia 10cm = 2 komórki przed robotem
+            wall_dist_cells = 2
+            wall_x = rx + int(wall_dist_cells * c_th)
+            wall_y = ry + int(wall_dist_cells * s_th)
+            if self.is_in_bounds(wall_x, wall_y):
+                # Zaznacz szeroki pas (10cm buffer) jako ścianę
+                for dx in range(-1, 2):
+                    for dy in range(-1, 2):
+                        wx, wy = wall_x + dx, wall_y + dy
+                        if self.is_in_bounds(wx, wy):
+                            self.raw_grid[wy, wx] = 100
+
+    def get_occupied_points(self, max_points: int = 3000) -> np.ndarray:
+        """Get random sample of obstacle points for ICP."""
+        occupied = np.argwhere(self.raw_grid == 100)
+        if len(occupied) == 0:
+            return np.empty((0, 2), dtype=np.float64)
+        if len(occupied) > max_points:
+            indices = np.random.choice(len(occupied), max_points, replace=False)
+            occupied = occupied[indices]
+        pts = np.empty((len(occupied), 2), dtype=np.float64)
+        pts[:, 0] = (occupied[:, 1] - self.origin_x + 0.5) * self.cell_size
+        pts[:, 1] = (occupied[:, 0] - self.origin_y + 0.5) * self.cell_size
+        return pts
+
+    def get_inflated_costmap(self) -> np.ndarray:
+        """Generate dilated obstacle mask for safe path planning."""
+        occupied = (self.raw_grid == 100)
+        return binary_dilation(occupied, structure=self.inflation_struct, border_value=0)
+
+    def to_image(self) -> np.ndarray:
+        """Convert grid to RGB image for visualization."""
+        img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        img[self.raw_grid == -1] = (16, 20, 26)     # Unknown (dark blue-gray)
+        img[self.raw_grid == 0] = (220, 226, 220)   # Free (light gray)
+        img[self.raw_grid == 100] = (15, 15, 15)    # Obstacles (black)
+        return img
+
+
+# ============================================================================
+# ROBUST LOCALIZER – CSM + ICP z QUALITY GATING
+# ============================================================================
+class RobustLocalizer:
+    """
+    Two-stage localization: Correlative Search + Precise ICP.
+    With quality gating: RMSE <= 0.085m AND inlier_ratio >= 0.35.
+    """
+    def __init__(self, max_iter: int = 10, tol: float = 1e-4) -> None:
+        self.max_iter = max_iter
+        self.tol = tol
+
+    @staticmethod
+    def transform_points(points: np.ndarray, pose: np.ndarray) -> np.ndarray:
+        """Transform points from robot frame to world frame using pose."""
+        c, s = math.cos(pose[2]), math.sin(pose[2])
+        rot = np.array([[c, -s], [s, c]], dtype=np.float64)
+        return (points @ rot.T) + pose[:2]
+
+    def coarse_angle_search(self,
+                            scan_pts: np.ndarray,
+                            raw_grid: np.ndarray,
+                            origin_xy: Tuple[int, int],
+                            cell_size: float,
+                            base_pose: np.ndarray,
+                            step_deg: float = 2.0) -> float:
+        """
+        Correlative angle search within ±30° window of current orientation
+        (instead of full 360°) to eliminate 180° flips in narrow corridors.
+        """
+        # Ograniczony zakres: ±30° wokół bieżącej orientacji
+        center_deg = math.degrees(base_pose[2])
+        angles_deg = np.arange(center_deg - 30, center_deg + 31, step_deg)
+        angles = np.radians(angles_deg)
+        
+        best_angle = base_pose[2]
+        best_score = -1
+
+        ox, oy = origin_xy
+        h, w = raw_grid.shape
+        sample = scan_pts[::2]
+
+        for th in angles:
+            c, s = math.cos(th), math.sin(th)
+            wx = base_pose[0] + c * sample[:, 0] - s * sample[:, 1]
+            wy = base_pose[1] + s * sample[:, 0] + c * sample[:, 1]
+
+            ixs = np.floor(wx / cell_size).astype(np.int32) + ox
+            iys = np.floor(wy / cell_size).astype(np.int32) + oy
+
+            valid = (ixs >= 0) & (ixs < w) & (iys >= 0) & (iys < h)
+            if not np.any(valid):
+                continue
+
+            score = int(np.sum(raw_grid[iys[valid], ixs[valid]] == 100))
+            if score > best_score:
+                best_score = score
+                best_angle = th
+
+        return best_angle
+
+    def localize(self,
+                 scan_pts: np.ndarray,
+                 map_pts: np.ndarray,
+                 raw_grid: np.ndarray,
+                 origin_xy: Tuple[int, int],
+                 cell_size: float,
+                 current_pose: np.ndarray) -> Tuple[np.ndarray, bool, float, float]:
+        """
+        Localize robot using scan and map with quality gating.
+        Returns: (pose, is_valid, rmse, inlier_ratio)
+        """
+        if len(scan_pts) < 15 or len(map_pts) < 15:
+            return current_pose.copy(), False, 999.0, 0.0
+
+        # KROK 1: Correlative Angle Search (±30° window)
+        best_th = self.coarse_angle_search(scan_pts, raw_grid, origin_xy, cell_size, current_pose)
+        pose = np.array([current_pose[0], current_pose[1], best_th], dtype=np.float64)
+
+        tree = cKDTree(map_pts)
+        final_rmse = 999.0
+        inliers_count = 0
+
+        # KROK 2: Precise ICP on SVD
+        for iteration in range(self.max_iter):
+            transformed = self.transform_points(scan_pts, pose)
+            dists, idxs = tree.query(transformed, k=1, distance_upper_bound=ICP_MAX_CORR_DIST)
+            valid = dists < ICP_MAX_CORR_DIST
+            inliers_count = int(np.count_nonzero(valid))
+
+            if inliers_count < ICP_MIN_INLIERS:
+                break
+
+            src = transformed[valid]
+            dst = map_pts[idxs[valid]]
+
+            mean_s = np.mean(src, axis=0)
+            mean_d = np.mean(dst, axis=0)
+
+            H = (src - mean_s).T @ (dst - mean_d)
+            U, _, Vt = svd(H)
+            R_delta = Vt.T @ U.T
+            if np.linalg.det(R_delta) < 0:
+                Vt[1, :] *= -1
+                R_delta = Vt.T @ U.T
+
+            t_delta = mean_d - R_delta @ mean_s
+
+            pose[:2] = R_delta @ pose[:2] + t_delta
+            d_theta = math.atan2(R_delta[1, 0], R_delta[0, 0])
+            pose[2] = (pose[2] + d_theta + math.pi) % (2 * math.pi) - math.pi
+
+            final_rmse = float(np.sqrt(np.mean(dists[valid] ** 2)))
+
+            if np.linalg.norm(t_delta) < self.tol and abs(d_theta) < self.tol:
+                break
+
+        inlier_ratio = float(inliers_count / len(scan_pts)) if len(scan_pts) > 0 else 0.0
+
+        # QUALITY GATING: Accept only if RMSE <= 0.085m AND inlier_ratio >= 0.35
+        is_valid = (final_rmse <= ICP_MAX_RMSE and
+                    inlier_ratio >= ICP_MIN_INLIER_RATIO and
+                    inliers_count >= ICP_MIN_INLIERS)
+
+        return (pose if is_valid else current_pose.copy()), is_valid, final_rmse, inlier_ratio
+
+
+# ============================================================================
+# OPTIMISTIC PATH PLANNER – A* z EXPLORATION WEIGHTS
+# ============================================================================
+class OptimisticPathPlanner:
+    """
+    A* pathfinding with exploration support.
+    Cell costs: free=1.0, unknown=1.4, obstacles/inflated=infinity.
+    Allows pathfinding through unexplored areas to reach goal.
+    """
+    def __init__(self, map_manager: ProbabilisticMapManager) -> None:
+        self.map_mgr = map_manager
+
+    @staticmethod
+    def heuristic(a: Tuple[int, int], b: Tuple[int, int]) -> float:
+        """Manhattan distance heuristic."""
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    def plan(self, start: Tuple[int, int], goal: Tuple[int, int]) -> List[Tuple[int, int]]:
+        """
+        Plan path from start to goal using A*.
+        Returns list of grid cells from start to goal.
+        """
+        if not self.map_mgr.is_in_bounds(start[0], start[1]) or \
+           not self.map_mgr.is_in_bounds(goal[0], goal[1]):
+            return []
+
+        costmap_inflated = self.map_mgr.get_inflated_costmap()
+
+        # Jeśli cel jest w ścianie, znajdź bliski wolny spot
+        if costmap_inflated[goal[1], goal[0]]:
+            found = False
+            for r in range(1, 10):
+                for dx in range(-r, r + 1):
+                    for dy in range(-r, r + 1):
+                        gx, gy = goal[0] + dx, goal[1] + dy
+                        if self.map_mgr.is_in_bounds(gx, gy) and not costmap_inflated[gy, gx]:
+                            goal = (gx, gy)
+                            found = True
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+            if not found:
+                return []
+
+        open_set = [(0.0, start)]
+        came_from: Dict[Tuple[int, int], Optional[Tuple[int, int]]] = {start: None}
+        g_score = {start: 0.0}
+
+        while open_set:
+            _, curr = min(open_set, key=lambda it: it[0])
+            open_set = [it for it in open_set if it[1] != curr]
+
+            if curr == goal:
+                path = []
+                while curr:
+                    path.append(curr)
+                    curr = came_from[curr]
+                return list(reversed(path))
+
+            # 8-directional movement
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                nx, ny = curr[0] + dx, curr[1] + dy
+                if not self.map_mgr.is_in_bounds(nx, ny):
+                    continue
+                if costmap_inflated[ny, nx]:  # Obstacle or inflated zone
+                    continue
+
+                # Cost calculation
+                step_cost = 1.414 if (dx != 0 and dy != 0) else 1.0
+                cell_val = self.map_mgr.raw_grid[ny, nx]
+
+                # Exploration bonus: unknown cells have higher cost but are traversable
+                # 0 (free) -> 1.0, -1 (unknown) -> 1.4
+                unknown_penalty = 1.4 if cell_val == -1 else 1.0
+                tentative = g_score[curr] + step_cost * unknown_penalty
+
+                if tentative < g_score.get((nx, ny), float("inf")):
+                    came_from[(nx, ny)] = curr
+                    g_score[(nx, ny)] = tentative
+                    f_score = tentative + self.heuristic((nx, ny), goal)
+                    open_set.append((f_score, (nx, ny)))
+
+        return []
+
+
+# ============================================================================
+# AUTONOMOUS WORKER – STOP-AND-GO NAVIGATION z SLAM
+# ============================================================================
+class AutonomousWorker(threading.Thread):
+    """
+    Main navigation loop: full scan -> localization -> map update -> path planning -> Stop-and-Go step.
+    Includes Proximity Guard: check front arc for obstacles >= 20cm.
+    """
+    def __init__(self, host: str, map_manager: ProbabilisticMapManager, out_queue: queue.Queue) -> None:
+        super().__init__(daemon=True)
+        self.host = host
+        self.map_mgr = map_manager
+        self.planner = OptimisticPathPlanner(self.map_mgr)
+        self.out_queue = out_queue
+        self.running = True
+
+        self.localizer = RobustLocalizer()
+        self.pose = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.last_keyframe_pose = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        self.bootstrapped = False
+        self.last_scan_world = np.empty((0, 2), dtype=np.float64)
+
+        self.goal_world: Optional[np.ndarray] = None
+        self.nav_enabled = False
+        self.path_cells: List[Tuple[int, int]] = []
+        self.state_msg = "IDLE"
+
+    def stop(self) -> None:
+        self.running = False
+
+    def set_goal(self, goal_xy: Optional[np.ndarray], start_navigation: bool = False) -> None:
+        self.goal_world = goal_xy
+        self.nav_enabled = start_navigation
+
+    def _http_get(self, path: str) -> Optional[Dict[str, Any]]:
+        """GET request to ESP32."""
+        url = f"http://{self.host}{path}"
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            return None
+
+    def _http_post(self, path: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """POST request to ESP32."""
+        url = f"http://{self.host}{path}"
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(url, data=data,
+                                         headers={"Content-Type": "application/json"},
+                                         method="POST")
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT_S) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception:
+            return None
+
+    def _check_proximity_guard(self, scan_local_pts: np.ndarray) -> Tuple[bool, float]:
+        """
+        Proximity Guard: sprawdza odległość w układzie lokalnym robota (X=przód, Y=lewo).
+        """
+        if len(scan_local_pts) == 0:
+            return True, 10.0
+
+        min_dist = 10.0
+        for px, py in scan_local_pts:
+            dist = math.hypot(px, py)
+            if dist == 0:
+                continue
+            angle_rad = math.atan2(py, px)
+
+            # Stożek przedni ±35° (0 rad = prosto przed robotem)
+            if abs(angle_rad) <= PROXIMITY_GUARD_ANGLE:
+                if dist < min_dist:
+                    min_dist = dist
+                if dist < PROXIMITY_GUARD_M:
+                    return False, dist
+
+        return True, min_dist
+
+    def run(self) -> None:
+        """Main navigation loop."""
+        while self.running:
+            # 1. FULL SCAN: Get complete 360° LiDAR rotation
+            data = self._http_get("/api/lidar/scan?since=0")
+            if not data or "pts" not in data:
+                time.sleep(0.1)
+                continue
+
+            pts_raw = data.get("pts", [])
+            edge_detected = data.get("edge_detected", False)
+            collision = data.get("collision", False)
+
+            if len(pts_raw) < 20:
+                time.sleep(0.08)
+                continue
+
+            # Parse LiDAR points: format = [angle_hundredths, distance_mm, ...]
+            arr = np.array(pts_raw, dtype=np.float64).reshape(-1, 2)
+            angles = -(arr[:, 0] / 100.0 * math.pi / 180.0)  # CW -> CCW
+            dists = arr[:, 1] / 1000.0  # mm -> m
+
+            valid_mask = (dists >= MIN_RANGE_M) & (dists <= MAX_RANGE_M)
+            if np.count_nonzero(valid_mask) < 15:
+                time.sleep(0.08)
+                continue
+
+            angles = angles[valid_mask]
+            dists = dists[valid_mask]
+            scan_pts = np.vstack((np.cos(angles) * dists, np.sin(angles) * dists)).T
+
+            map_pts = self.map_mgr.get_occupied_points()
+
+            # 2. LOCALIZATION & MAP UPDATE
+            if not self.bootstrapped or len(map_pts) < 30:
+                # Bootstrap: first frame
+                self.map_mgr.update_from_scan(scan_pts, self.pose, edge_detected)
+                self.last_keyframe_pose = self.pose.copy()
+                self.bootstrapped = True
+                is_valid, rmse, ratio = True, 0.0, 1.0
+                self.state_msg = "BOOTSTRAPPING..."
+            else:
+                # Localize using robust localizer
+                origin = (self.map_mgr.origin_x, self.map_mgr.origin_y)
+                new_pose, is_valid, rmse, ratio = self.localizer.localize(
+                    scan_pts, map_pts, self.map_mgr.raw_grid, origin,
+                    self.map_mgr.cell_size, self.pose
+                )
+
+                if is_valid:
+                    self.pose = new_pose
+                    d_trans = np.linalg.norm(self.pose[:2] - self.last_keyframe_pose[:2])
+                    d_rot = abs((self.pose[2] - self.last_keyframe_pose[2] + math.pi) % (2 * math.pi) - math.pi)
+
+                    # Keyframe: update map when moved enough
+                    if d_trans >= KEYFRAME_MIN_DIST or d_rot >= KEYFRAME_MIN_ANGLE:
+                        self.map_mgr.update_from_scan(scan_pts, self.pose, edge_detected)
+                        self.last_keyframe_pose = self.pose.copy()
+                    self.state_msg = "SLAM OK"
+                else:
+                    self.state_msg = f"ICP REJECTED (RMSE={rmse:.3f}m,ratio={ratio:.2f})"
+
+            # Transform scan to world frame for visualization
+            self.last_scan_world = self.localizer.transform_points(scan_pts, self.pose)
+
+            # 3. STOP-AND-GO NAVIGATION
+            if self.goal_world is not None and self.nav_enabled and is_valid:
+                start_c = self.map_mgr.world_to_grid(self.pose[0], self.pose[1])
+                goal_c = self.map_mgr.world_to_grid(self.goal_world[0], self.goal_world[1])
+                self.path_cells = self.planner.plan(start_c, goal_c)
+
+                dist_to_goal = float(np.linalg.norm(self.pose[:2] - self.goal_world))
+                if dist_to_goal < 0.25:
+                    self.state_msg = "GOAL REACHED!"
+                    self.nav_enabled = False
+                elif len(self.path_cells) >= 2:
+                    # PROXIMITY GUARD CHECK na lokalnej chmurze (scan_pts, NIE last_scan_world)
+                    is_clear, min_dist = self._check_proximity_guard(scan_pts)
+
+                    if not is_clear:
+                        # Przeszkoda blisko - wywołaj procedurę korekcyjną (szukanie wolnego sektora)
+                        self.state_msg = f"PROXIMITY GUARD: dist={min_dist:.2f}m < {PROXIMITY_GUARD_M}m, correcting..."
+                        best_angle = None
+                        best_clear = False
+                        
+                        # Przeszukuj okno kątowe (-70° do +70°) względem przodu robota
+                        for test_angle in np.linspace(-math.radians(70), math.radians(70), 15):
+                            test_clear = True
+                            for px, py in scan_pts:
+                                dist = math.hypot(px, py)
+                                rel_angle = math.atan2(py, px) # 0 = przód robota
+                                angle_err = (rel_angle - test_angle + math.pi) % (2 * math.pi) - math.pi
+                                if abs(angle_err) <= PROXIMITY_GUARD_ANGLE and dist < PROXIMITY_GUARD_M:
+                                    test_clear = False
+                                    break
+                            if test_clear:
+                                best_angle = test_angle
+                                best_clear = True
+                                break
+
+                        if best_clear:
+                            # Znaleziono wolny sektor - obrót w miejscu
+                            turn_speed = 30 if best_angle > 0 else -30
+                            payload = {"pwm_l": -turn_speed, "pwm_r": turn_speed, "duration_ms": 180}
+                            self._http_post("/api/autonomy/remote_move", payload)
+                            time.sleep(0.18 + 0.1)
+                        else:
+                            # Brak wolnego sektora z przodu - cofanie
+                            payload = {"pwm_l": -30, "pwm_r": -30, "duration_ms": 220}
+                            self._http_post("/api/autonomy/remote_move", payload)
+                            time.sleep(0.22 + 0.1)
+                    else:
+                        # Ścieżka jest wolna - kontynuuj nawigację A* (wybór celu 6 kroków przed)
+                        target_idx = min(6, len(self.path_cells) - 1)
+                        target_cell = self.path_cells[target_idx]
+                        target_wx, target_wy = self.map_mgr.grid_to_world(*target_cell)
+
+                        delta_x = target_wx - self.pose[0]
+                        delta_y = target_wy - self.pose[1]
+                        target_angle = math.atan2(delta_y, delta_x)
+                        angle_err = (target_angle - self.pose[2] + math.pi) % (2 * math.pi) - math.pi
+
+                        if abs(angle_err) > math.radians(16.0):
+                            # Wymagany obrót w stronę wezła
+                            turn_dir = 1 if angle_err > 0 else -1
+                            payload = {"pwm_l": -turn_dir * 35, "pwm_r": turn_dir * 35, "duration_ms": 220}
+                            self._http_post("/api/autonomy/remote_move", payload)
+                            self.state_msg = f"NAVIGATING: Rotating {math.degrees(angle_err):.0f}°"
+                            time.sleep(0.22 + 0.1)
+                        else:
+                            # Otwarta droga do przodu
+                            payload = {"pwm_l": 40, "pwm_r": 40, "duration_ms": 380}
+                            self._http_post("/api/autonomy/remote_move", payload)
+                            self.state_msg = f"NAVIGATING: Moving forward (dist to goal: {dist_to_goal:.2f}m)"
+                            time.sleep(0.38 + 0.1)
+                else:
+                    self.state_msg = "NO PATH AVAILABLE"
+
+            elif self.goal_world is not None and not self.nav_enabled:
+                # Goal set but navigation disabled - just plan
+                start_c = self.map_mgr.world_to_grid(self.pose[0], self.pose[1])
+                goal_c = self.map_mgr.world_to_grid(self.goal_world[0], self.goal_world[1])
+                self.path_cells = self.planner.plan(start_c, goal_c)
+                self.state_msg = f"READY (goal set, {len(self.path_cells)} waypoints)"
+            else:
+                self.path_cells = []
+
+            # 4. PUBLISH SNAPSHOT
+            path_pts = [self.map_mgr.grid_to_world(*c) for c in self.path_cells]
+
+            snapshot = {
+                "pose": self.pose.copy(),
+                "map_image": self.map_mgr.to_image(),
+                "scan_world": self.last_scan_world,
+                "path_pts": path_pts,
+                "goal_world": self.goal_world.copy() if self.goal_world is not None else None,
+                "is_valid": is_valid,
+                "rmse": rmse,
+                "inlier_ratio": ratio,
+                "state_msg": self.state_msg,
+                "edge_detected": edge_detected,
+                "collision": collision
+            }
+
+            if self.out_queue.full():
+                try:
+                    self.out_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            self.out_queue.put_nowait(snapshot)
+
+            time.sleep(0.06)
+
+
+# ============================================================================
+# GRAPHICAL USER INTERFACE – TKINTER + MATPLOTLIB
+# ============================================================================
+class NavigationApp:
+    """Main GUI application for SLAM visualization and navigation control."""
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("Autonomous Vehicle – Enhanced SLAM Navigation")
+        self.root.geometry("1200x900")
+
+        self.map_mgr = ProbabilisticMapManager(GRID_WIDTH, GRID_HEIGHT, CELL_SIZE_M)
+        self.pose = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+
+        self.data_queue: queue.Queue = queue.Queue(maxsize=2)
+        self.worker: Optional[AutonomousWorker] = None
+        self.goal_world: Optional[np.ndarray] = None
+
+        self._build_ui()
+        self.root.after(UI_REFRESH_MS, self._poll_queue)
+
+    def _build_ui(self) -> None:
+        """Build user interface."""
+        ctrl = ttk.Frame(self.root, padding=8)
+        ctrl.pack(side=tk.TOP, fill=tk.X)
+
+        ttk.Label(ctrl, text="ESP32 Host:").pack(side=tk.LEFT, padx=4)
+        self.host_var = tk.StringVar(value=DEFAULT_HOST)
+        ttk.Entry(ctrl, textvariable=self.host_var, width=18).pack(side=tk.LEFT, padx=4)
+
+        self.btn_toggle = ttk.Button(ctrl, text="▶ START SLAM", command=self.toggle_scan)
+        self.btn_toggle.pack(side=tk.LEFT, padx=6)
+
+        self.btn_nav = ttk.Button(ctrl, text="🚀 START NAVIGATION", command=self.toggle_nav, state=tk.DISABLED)
+        self.btn_nav.pack(side=tk.LEFT, padx=4)
+
+        ttk.Button(ctrl, text="CLEAR MAP", command=self.clear_map).pack(side=tk.LEFT, padx=4)
+
+        self.lbl_status = ttk.Label(ctrl, text="Status: Ready", font=("Consolas", 9))
+        self.lbl_status.pack(side=tk.LEFT, padx=12)
+
+        # Matplotlib canvas
+        import matplotlib
+        matplotlib.use("TkAgg")
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+
+        self.fig = Figure(figsize=(10, 8), dpi=100)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_aspect("equal", adjustable="box")
+        self.ax.set_xlim(-6.0, 6.0)
+        self.ax.set_ylim(-6.0, 6.0)
+        self.ax.set_xlabel("X [m]")
+        self.ax.set_ylabel("Y [m]")
+        self.ax.set_title("Global Occupancy Map – SLAM with Stop-and-Go Navigation")
+        self.ax.grid(True, linestyle=":", alpha=0.4)
+
+        dummy_img = self.map_mgr.to_image()
+        self.map_img = self.ax.imshow(
+            dummy_img,
+            extent=[-GRID_WIDTH // 2 * CELL_SIZE_M, GRID_WIDTH // 2 * CELL_SIZE_M,
+                    -GRID_HEIGHT // 2 * CELL_SIZE_M, GRID_HEIGHT // 2 * CELL_SIZE_M],
+            origin="lower"
+        )
+        self.scatter_scan, = self.ax.plot([], [], "o", color=COLOR_SCAN, markersize=2, alpha=0.6, label="LiDAR scan")
+        self.path_line, = self.ax.plot([], [], color=COLOR_PATH, linewidth=2.5, label="Path (A*)")
+        self.marker_robot, = self.ax.plot([0], [0], marker="o", color=COLOR_ROBOT, markersize=10, label="Robot")
+        self.line_dir, = self.ax.plot([0, 0.25], [0, 0], color=COLOR_ROBOT, linewidth=2.5)
+        self.marker_goal, = self.ax.plot([], [], marker="X", color=COLOR_GOAL, markersize=12, label="Goal")
+
+        self.ax.legend(loc="upper right", fontsize=8)
+
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self.canvas.mpl_connect("button_press_event", self._on_map_click)
+
+    def _on_map_click(self, event: Any) -> None:
+        """Handle map click to set goal."""
+        if event.inaxes != self.ax:
             return
-        n = self.client.export_csv(path)
-        messagebox.showinfo("Eksport", f"Zapisano {n} komórek do:\n{path}")
-
-    # ── pętla odświeżania GUI ───────────────────────────────────────
-    def _schedule_redraw(self):
-        self._redraw()
-        self.root.after(REDRAW_INTERVAL_MS, self._schedule_redraw)
-
-    def _redraw(self):
-        snap = self.client.snapshot()
-
-        self.grid_sc.set_offsets(snap["grid"] if len(snap["grid"]) else np.empty((0, 2)))
-        if self.live_var.get():
-            self.live_sc.set_offsets(snap["live"] if len(snap["live"]) else np.empty((0, 2)))
-        else:
-            self.live_sc.set_offsets(np.empty((0, 2)))
-
-        running = self.client._thread and self.client._thread.is_alive()
-        if not running:
-            self.status.config(text="● Zatrzymano", foreground="#777")
-        elif snap["connected"]:
-            self.status.config(
-                text=(f"● Połączono   |   przeszkód (kropek): {snap['n_cells']}   |   "
-                      f"{snap['rpm']} RPM   |   {snap['pps']:.0f} pkt/s"),
-                foreground="#2a9d2a")
-        else:
-            err = snap["error"] or "brak odpowiedzi"
-            self.status.config(text=f"● Łączenie… ({err})", foreground="#c0392b")
-
+        self.goal_world = np.array([event.xdata, event.ydata], dtype=np.float64)
+        self.marker_goal.set_data([self.goal_world[0]], [self.goal_world[1]])
+        self.btn_nav.config(state=tk.NORMAL)
+        if self.worker:
+            self.worker.set_goal(self.goal_world, start_navigation=False)
         self.canvas.draw_idle()
 
+    def toggle_nav(self) -> None:
+        """Start navigation to goal."""
+        if self.worker and self.goal_world is not None:
+            self.worker.set_goal(self.goal_world, start_navigation=True)
+            self.lbl_status.config(text="Status: Navigation started...")
 
-def main():
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    def toggle_scan(self) -> None:
+        """Start/stop SLAM."""
+        if self.worker and self.worker.is_alive():
+            self.worker.stop()
+            self.worker = None
+            self.btn_toggle.config(text="▶ START SLAM")
+            self.btn_nav.config(state=tk.DISABLED)
+            self.lbl_status.config(text="Status: Stopped")
+        else:
+            host = self.host_var.get().strip()
+            self.worker = AutonomousWorker(host, self.map_mgr, self.data_queue)
+            if self.goal_world is not None:
+                self.worker.set_goal(self.goal_world, start_navigation=False)
+            self.worker.start()
+            self.btn_toggle.config(text="⏸ STOP")
+
+    def clear_map(self) -> None:
+        """Clear map and reset."""
+        if self.worker and self.worker.is_alive():
+            self.worker.stop()
+            self.worker = None
+            self.btn_toggle.config(text="▶ START SLAM")
+        self.map_mgr = ProbabilisticMapManager(GRID_WIDTH, GRID_HEIGHT, CELL_SIZE_M)
+        self.pose[:] = 0.0
+        self.goal_world = None
+        self.btn_nav.config(state=tk.DISABLED)
+        self.map_img.set_data(self.map_mgr.to_image())
+        self.scatter_scan.set_data([], [])
+        self.path_line.set_data([], [])
+        self.marker_goal.set_data([], [])
+        self.marker_robot.set_data([0], [0])
+        self.line_dir.set_data([0, 0.25], [0, 0])
+        self.canvas.draw_idle()
+        self.lbl_status.config(text="Status: Map cleared")
+
+    def _poll_queue(self) -> None:
+        """Poll worker queue for updates."""
+        try:
+            while not self.data_queue.empty():
+                snap = self.data_queue.get_nowait()
+                self.pose = snap["pose"]
+                self.map_img.set_data(snap["map_image"])
+
+                sc_pts = snap["scan_world"]
+                if sc_pts.shape[0] > 0:
+                    self.scatter_scan.set_data(sc_pts[:, 0], sc_pts[:, 1])
+
+                self.marker_robot.set_data([self.pose[0]], [self.pose[1]])
+                self.line_dir.set_data(
+                    [self.pose[0], self.pose[0] + math.cos(self.pose[2]) * 0.4],
+                    [self.pose[1], self.pose[1] + math.sin(self.pose[2]) * 0.4]
+                )
+
+                path = snap["path_pts"]
+                if path:
+                    xs, ys = zip(*path)
+                    self.path_line.set_data(xs, ys)
+                else:
+                    self.path_line.set_data([], [])
+
+                deg = math.degrees(self.pose[2])
+                edge_msg = "🔴 EDGE" if snap.get("edge_detected", False) else ""
+                collision_msg = "💥 COLLISION" if snap.get("collision", False) else ""
+                extra = f" {edge_msg} {collision_msg}".strip()
+
+                self.lbl_status.config(
+                    text=f"{snap['state_msg']}{extra} | X:{self.pose[0]:+.2f}m Y:{self.pose[1]:+.2f}m "
+                         f"θ:{deg:.0f}° | RMSE:{snap['rmse']:.3f}m ratio:{snap['inlier_ratio']:.2f}"
+                )
+                self.canvas.draw_idle()
+        except queue.Empty:
+            pass
+
+        self.root.after(UI_REFRESH_MS, self._poll_queue)
 
 
 if __name__ == "__main__":
-    main()
+    root = tk.Tk()
+    app = NavigationApp(root)
+    root.mainloop()

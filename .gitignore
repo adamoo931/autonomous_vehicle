@@ -1,16 +1,24 @@
-# Artefakty kompilacji ESP-IDF
-/build/
+# ESP-IDF Build & Binaries
+build/
+sdkconfig
 sdkconfig.old
-
-# Zależności pobierane automatycznie przez menedżer komponentów
-/managed_components/
 dependencies.lock
 
-# Środowiska i pliki lokalne
-.venv/
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
 
-# Pliki edytora / systemu
+# IDE configuration
 .vscode/
+.clangd/
+.idea/
+
+# System & OS
 .DS_Store
+Thumbs.db
+
+# Output artifacts
+*.png
+*.gif
+*.csv

@@ -1,6 +1,0 @@
--Wno-frame-address
--mlongcalls
--fno-builtin-memcpy
--fno-builtin-memset
--fno-builtin-bzero
-"-specs=C:/Users/Szymon/Documents/projekt ase/autonomous_vehicle/build/specs/picolibc.specs"
