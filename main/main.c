@@ -18,6 +18,7 @@
 #include "buzzer.h"
 #include "lidar.h"
 #include "autonomy.h"
+#include "line_test.h"
 #include "wifi_manager.h"
 #include "http_server.h"
 #include "web_monitor.h"
@@ -49,8 +50,11 @@ static void sensor_task(void *arg) {
     ina219_data_t   ina;
     ads1115_data_t  hall;
     int slow = 0;
-    bool was_finish = false;   /* poprzedni stan czujnika Halla mety - do wykrycia zbocza */
-    bool was_hot    = false;   /* poprzedni stan wykrycia obiektu cieplnego - do wykrycia zbocza */
+    bool was_finish   = false; /* poprzedni stan czujnika Halla mety - do wykrycia zbocza */
+    bool was_hot      = false; /* poprzedni stan wykrycia obiektu cieplnego - do wykrycia zbocza */
+    bool was_auto     = false; /* poprzedni stan autonomii - do wykrycia startu przejazdu */
+    bool was_line     = false; /* poprzedni stan czujników odbiciowych - do wykrycia zbocza */
+    bool finish_latch = false; /* meta wykryta Hallem - trzyma zieloną diodę zapaloną */
 
     while (1) {
         imu_read(&imu);
@@ -66,21 +70,27 @@ static void sensor_task(void *arg) {
          * w http_server przy każdym żądaniu HTTP. */
 
         /* Sygnalizacja stanu diodami LED: czerwona = autonomia nieaktywna,
-         * zielona = autonomia aktywna (świeci cały czas, dopóki trwa).
+         * zielona = autonomia aktywna LUB wykryto metę (zatrzask trzyma zieloną
+         * zapaloną po przejeździe, aż do startu kolejnego przejazdu).
          * Żółta na razie nieobsługiwana. */
         bool auto_on = autonomy_is_enabled();
-        led_set_green(auto_on);
+        if (auto_on && !was_auto) finish_latch = false;   /* nowy przejazd kasuje sygnał mety */
+        was_auto = auto_on;
+        led_set_green(auto_on || finish_latch);
         led_set_red(!auto_on);
 
-        /* Meta (czujnik Halla SS495A przez ADS1115, patrz config.h:
-         * HALL_FINISH_LOW_V/HALL_FINISH_HIGH_V): zbocze
-         * "niewykryto -> wykryto" odgrywa jingle raz, nie w pętli, i
+        /* Meta (czujnik Halla SS495A przez ADS1115, próg regulowany z
+         * dashboardu - patrz ads1115_set_finish_threshold): zbocze
+         * "niewykryto -> wykryto" odgrywa jednorazowo pojedynczy 2-sekundowy
+         * jednostajny ton, zapala zieloną diodę (zatrzask finish_latch) i
          * uruchamia tryb szukania obiektu cieplnego pirometrem. Sam
          * odczyt/aktualizacja pola na dashboardzie dzieje się już w
          * http_server przy każdym /api/sensors. */
         bool is_finish = hall.finish_detected;
         if (is_finish && !was_finish) {
-            buzzer_play_ice_cream_song_once();
+            buzzer_play_finish_tone();
+            finish_latch = true;
+            led_set_green(true);
             pyrometer_start_search();
         }
         was_finish = is_finish;
@@ -95,6 +105,28 @@ static void sensor_task(void *arg) {
             motor_stop();
         }
         was_hot = is_hot;
+
+        /* Zabezpieczenie przy sterowaniu RĘCZNYM: wykrycie linii/krawędzi
+         * którymkolwiek z czujników odbiciowych CNY70 zatrzymuje silniki
+         * (bez żadnej sygnalizacji dźwiękowej). Reakcja tylko na zbocze
+         * "brak linii -> linia" i wyłącznie gdy silniki są uruchomione -
+         * dzięki temu po zatrzymaniu można ręcznie odjechać z linii, mimo że
+         * czujnik nadal ją widzi, a stojący pojazd na linii nic nie robi.
+         * W trybie autonomicznym wyłączone: tor jest obramowany identyczną
+         * taśmą odblaskową (patrz autonomy.c), więc czujniki linii dałyby tam
+         * ciągłe fałszywe zatrzymania. Podczas testu wykrywania linii również
+         * pomijane - ten moduł ma własną, dokładniejszą obsługę wykrycia. */
+        if (!auto_on && !line_test_is_running()) {
+            bool is_line = line_sensor_any_edge();
+            bool moving  = motor_get_left_speed() != 0 || motor_get_right_speed() != 0;
+            if (is_line && !was_line && moving) {
+                motor_stop();
+                ESP_LOGI(TAG, "Linia wykryta czujnikiem odbiciowym - zatrzymuje silniki (sterowanie reczne).");
+            }
+            was_line = is_line;
+        } else {
+            was_line = false;
+        }
 
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -160,6 +192,9 @@ void app_main(void) {
 
     /* Moduł autonomii (uruchamiany z dashboardu przyciskiem autonomii). */
     autonomy_init();
+
+    /* Moduł testu wykrywania linii (uruchamiany z dashboardu). */
+    line_test_init();
 
     /* Sygnał gotowości systemu. Autonomia startuje wyłączona, więc dioda
      * czerwona (patrz sensor_task) - stan ten i tak zostanie ustawiony przy

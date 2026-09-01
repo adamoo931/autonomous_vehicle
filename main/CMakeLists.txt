@@ -8,6 +8,7 @@ idf_component_register(SRCS
     "led_control.c"
     "buzzer.c"
     "autonomy.c"
+    "line_test.c"
     # Łączność i serwer
     "wifi_manager.c"
     "http_server.c"

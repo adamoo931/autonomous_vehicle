@@ -220,3 +220,9 @@ void buzzer_play_ice_cream_song_once(void) {
 void buzzer_play_scale_once(void) {
     buzzer_play_melody(s_scale_song, SCALE_SONG_LEN, false, 0);
 }
+
+/* Sygnał wykrycia mety: jeden jednostajny ton 2 kHz przez 2 s (bez melodii,
+ * bez staccato). tone_task i tak ogranicza czas trwania do 3 s. */
+void buzzer_play_finish_tone(void) {
+    buzzer_tone(2000, 2000);
+}
