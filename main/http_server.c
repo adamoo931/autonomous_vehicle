@@ -192,7 +192,14 @@ static const char DASHBOARD_HTML[] =
     "    <button onclick=\"setAzimuth()\">Zapisz</button>\n"
     "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"auto-azimuth-cur\">-</span>&#176;</span>\n"
     "  </div>\n"
-    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost i zatrzymuje si&#281; na przeszkodzie wykrytej lidarem (bez omijania). Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
+    "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
+    "    <label>Pr&#281;dko&#347;&#263; jazdy (na wprost/do ty&#322;u):</label>\n"
+    "    <input type=\"number\" id=\"auto-speed-in\" min=\"0\" max=\"100\" step=\"1\" value=\"35\" style=\"width:70px\">\n"
+    "    <span>%</span>\n"
+    "    <button onclick=\"setSpeed()\">Zapisz</button>\n"
+    "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiona: <span class=\"val\" id=\"auto-speed-cur\">-</span>%</span>\n"
+    "  </div>\n"
+    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost ustawion&#261; pr&#281;dko&#347;ci&#261;. Po wykryciu linii toru (czujniki odbiciowe ADC) staje na ~1,5 s i czeka na czujnik Halla &#8211; je&#347;li to meta, ko&#324;czy przejazd; je&#347;li nie, cofa si&#281; ~2 s i jedzie dalej. Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
     "</div>\n"
     "\n"
     "<div class=\"card\" style=\"margin-bottom:8px\">\n"
@@ -331,6 +338,11 @@ static const char DASHBOARD_HTML[] =
     "    if(d.autonomy){\n"
     "      updateAuto(d.autonomy.enabled,d.autonomy.state,d.autonomy.log_count);\n"
     "      document.getElementById('auto-azimuth-cur').textContent=d.autonomy.target_azimuth_deg.toFixed(0);\n"
+    "      if(typeof d.autonomy.speed_pct!=='undefined'){\n"
+    "        document.getElementById('auto-speed-cur').textContent=d.autonomy.speed_pct;\n"
+    "        var spi=document.getElementById('auto-speed-in');\n"
+    "        if(document.activeElement!==spi && !spi.dataset.touched){spi.value=d.autonomy.speed_pct;}\n"
+    "      }\n"
     "      document.getElementById('od-time').textContent=d.autonomy.run_time_s.toFixed(1);\n"
     "      document.getElementById('od-energy').textContent=d.autonomy.run_energy_mwh.toFixed(1);\n"
     "    }\n"
@@ -353,6 +365,18 @@ static const char DASHBOARD_HTML[] =
     "function setAzimuth(){\n"
     "  var v=parseFloat(document.getElementById('auto-azimuth-in').value)||0;\n"
     "  fetch('/api/autonomy/azimuth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({azimuth_deg:v})});\n"
+    "}\n"
+    "document.getElementById('auto-speed-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "function setSpeed(){\n"
+    "  var v=parseInt(document.getElementById('auto-speed-in').value);\n"
+    "  if(isNaN(v)){alert('Podaj predkosc w procentach (0-100)');return;}\n"
+    "  fetch('/api/autonomy/speed',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({speed_pct:v})})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){if(d&&typeof d.speed_pct!=='undefined'){\n"
+    "      var spi=document.getElementById('auto-speed-in');delete spi.dataset.touched;\n"
+    "      spi.value=d.speed_pct;\n"
+    "      document.getElementById('auto-speed-cur').textContent=d.speed_pct;\n"
+    "    }}).catch(function(){});\n"
     "}\n"
     "document.getElementById('hl-thr-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "function setHallThreshold(){\n"
@@ -582,6 +606,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
     cJSON_AddNumberToObject(autoj, "log_count", autonomy_log_count());
     cJSON_AddNumberToObject(autoj, "target_azimuth_deg", (double)autonomy_get_target_azimuth());
+    cJSON_AddNumberToObject(autoj, "speed_pct", autonomy_get_speed_pct());
     cJSON_AddNumberToObject(autoj, "run_time_s", (double)autonomy_get_run_time_s());
     cJSON_AddNumberToObject(autoj, "run_energy_mwh", (double)autonomy_get_run_energy_mwh());
     cJSON_AddItemToObject(root, "autonomy", autoj);
@@ -888,6 +913,44 @@ static esp_err_t handle_autonomy_azimuth(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* POST /api/autonomy/speed {"speed_pct":N} - ustawia moc silników jazdy
+ * autonomicznej na wprost/do tyłu (ST_CRUISE/ST_LINE_BACKUP w autonomy.c).
+ * Wartość w procentach mocy (0..100); moduł autonomii przycina ją do tego
+ * zakresu. Odpowiada aktualnie obowiązującą wartością (po przycięciu). */
+static esp_err_t handle_autonomy_speed(httpd_req_t *req) {
+    if (req->content_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing body");
+        return ESP_FAIL;
+    }
+    char buf[64];
+    if (read_body(req, buf, sizeof(buf)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    cJSON *j = cJSON_Parse(buf);
+    if (!j) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    cJSON *s = cJSON_GetObjectItem(j, "speed_pct");
+    if (!cJSON_IsNumber(s)) {
+        cJSON_Delete(j);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing speed_pct");
+        return ESP_FAIL;
+    }
+    autonomy_set_speed_pct((int)s->valuedouble);
+    cJSON_Delete(j);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "speed_pct", autonomy_get_speed_pct());
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, out);
+    free(out);
+    return ESP_OK;
+}
+
 /* POST /api/hall/threshold {"threshold_v":N} - ustawia próg detekcji mety
  * czujnikiem Halla: maksymalną odchyłkę napięcia SS495A od wartości
  * spoczynkowej (HALL_FINISH_REST_V), przy której meldowana jest meta.
@@ -1013,6 +1076,7 @@ esp_err_t http_server_start(void) {
         { .uri="/api/buzzer/stop",    .method=HTTP_POST, .handler=handle_buzzer_stop },
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
         { .uri="/api/autonomy/azimuth", .method=HTTP_POST, .handler=handle_autonomy_azimuth },
+        { .uri="/api/autonomy/speed",   .method=HTTP_POST, .handler=handle_autonomy_speed },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
         { .uri="/api/hall/threshold",   .method=HTTP_POST, .handler=handle_hall_threshold },
         { .uri="/api/line_test",        .method=HTTP_POST, .handler=handle_line_test },
