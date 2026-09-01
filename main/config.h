@@ -25,11 +25,20 @@
 
 /* ============================================================
  *  Czujniki linii CNY70 (odbiciowe) — wykrywanie krawędzi planszy
+ * ------------------------------------------------------------
+ *  Przód-lewy, tył-lewy i tył-prawy są odczytywane ANALOGOWO przez ADS1115
+ *  (kanały A1/A2/A3 — patrz sensors/ads1115.c); ich napięcia widać na
+ *  dashboardzie. Tylko przód-prawy pozostał cyfrowy na GPIO (PIN_LINE_FR to
+ *  GPIO tylko-wejście, wymaga zewnętrznego rezystora pull-up).
  * ============================================================ */
-#define PIN_LINE_FL     14      /* przód-lewy                               */
-#define PIN_LINE_FR     39      /* przód-prawy  (GPIO tylko-wejście)        */
-#define PIN_LINE_BL     15      /* tył-lewy                                 */
-#define PIN_LINE_BR     23      /* tył-prawy                                */
+#define PIN_LINE_FR     39      /* przód-prawy — jedyny nadal na GPIO       */
+
+/* Progi detekcji linii dla czujników odbiciowych na ADC (osobno na kanał):
+ * napięcie PONIŻEJ progu = linia wykryta. Wartości dobrane na docelowym
+ * sprzęcie po napięciach pokazywanych na dashboardzie. */
+#define LINE_FL_THRESHOLD_V   1.0f   /* A1 — przód-lewy */
+#define LINE_BL_THRESHOLD_V   1.75f   /* A2 — tył-lewy   */
+#define LINE_BR_THRESHOLD_V   0.75f   /* A3 — tył-prawy  */
 
 /* ============================================================
  *  Czujniki Halla — odometria kół (cyfrowe, GPIO)
@@ -68,7 +77,7 @@
  *  dlatego logi są dostępne przez monitor webowy (zob. web_monitor.c).
  *  Ustaw LIDAR_ENABLED na 0, aby debugować przez konsolę USB-Serial.
  */
-#define LIDAR_ENABLED    0
+#define LIDAR_ENABLED    1
 #define PIN_LIDAR_TX     3      /* ESP TX -> RX lidaru (komendy)            */
 #define PIN_LIDAR_RX     1      /* ESP RX <- TX lidaru (dane pomiarowe)     */
 #define LIDAR_UART_PORT  UART_NUM_2
@@ -139,12 +148,15 @@
  *  Próg detekcji mety przez czujnik Halla SS495A (przez ADS1115)
  * ============================================================
  *  SS495A jest liniowy (ratiometryczny) - napięcie w normalnej pracy
- *  (zmierzone na sprzęcie, bez magnesu mety w pobliżu) wynosi ok. 2,488V, a
- *  zbliżenie magnesu (dowolnym biegunem) odchyla je w górę lub w dół.
- *  Metę wykrywamy więc jako wyjście napięcia POZA pasmo
- *  HALL_FINISH_LOW_V..HALL_FINISH_HIGH_V - patrz sensors/ads1115.c. Dostrój
- *  obie granice eksperymentalnie na docelowym sprzęcie (jak
- *  PYROMETER_FINISH_THRESHOLD_C wcześniej dla pirometru), jeśli napięcie
- *  spoczynkowe się zmieni (np. inny egzemplarz czujnika/zasilanie). */
-#define HALL_FINISH_LOW_V     2.45f   /* poniżej tego = wykryto metę [V] */
-#define HALL_FINISH_HIGH_V    2.52f   /* powyżej tego = wykryto metę [V] */
+ *  (zmierzone na sprzęcie, bez magnesu mety w pobliżu) wynosi ok. 2,488V
+ *  (HALL_FINISH_REST_V), a zbliżenie magnesu (dowolnym biegunem) odchyla je
+ *  w górę lub w dół. Metę wykrywamy więc jako odchyłkę napięcia od wartości
+ *  spoczynkowej o co najmniej próg HALL_FINISH_THRESHOLD_V (w obie strony):
+ *      |napięcie - HALL_FINISH_REST_V| >= próg
+ *  Próg jest regulowany w trakcie pracy z dashboardu (pole "Próg [V]" w
+ *  karcie czujnika Halla, zapis przez POST /api/hall/threshold); poniższa
+ *  wartość to tylko domyślna po starcie. Dostrój ją eksperymentalnie na
+ *  docelowym sprzęcie, jeśli napięcie spoczynkowe się zmieni (np. inny
+ *  egzemplarz czujnika/zasilanie). */
+#define HALL_FINISH_REST_V        2.488f  /* napięcie spoczynkowe SS495A bez magnesu [V] */
+#define HALL_FINISH_THRESHOLD_V   0.040f  /* domyślny próg: |napięcie - spoczynek| >= tego = meta [V] */

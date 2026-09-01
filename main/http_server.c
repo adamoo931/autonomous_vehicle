@@ -10,6 +10,7 @@
 #include "buzzer.h"
 #include "lidar.h"
 #include "autonomy.h"
+#include "line_test.h"
 #include "line_sensor.h"
 #include "web_monitor.h"
 #include "esp_http_server.h"
@@ -106,6 +107,12 @@ static const char DASHBOARD_HTML[] =
     "    <div>Napi&#281;cie: <span class=\"val\" id=\"hl-v\">-</span> V</div>\n"
     "    <div>Meta: <span class=\"val\" id=\"hl-det\">-</span></div>\n"
     "    <div>Adres I2C: <span class=\"val\" id=\"hl-addr\">-</span></div>\n"
+    "    <div style=\"display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap\">\n"
+    "      <label>Pr&#243;g [V]:</label>\n"
+    "      <input type=\"number\" id=\"hl-thr-in\" min=\"0.001\" max=\"2\" step=\"0.005\" value=\"0.040\" style=\"width:80px\">\n"
+    "      <button onclick=\"setHallThreshold()\">Zapisz</button>\n"
+    "    </div>\n"
+    "    <div style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"hl-thr-cur\">-</span> V (odchy&#322;ka od spoczynku)</div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#128207; Odometria</h2>\n"
@@ -119,10 +126,10 @@ static const char DASHBOARD_HTML[] =
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#9633; Czujniki linii CNY70</h2>\n"
-    "    <div>Prz&#243;d L: <span class=\"val\" id=\"ls-fl\">-</span></div>\n"
-    "    <div>Prz&#243;d P: <span class=\"val\" id=\"ls-fr\">-</span></div>\n"
-    "    <div>Ty&#322; L: <span class=\"val\" id=\"ls-bl\">-</span></div>\n"
-    "    <div>Ty&#322; P: <span class=\"val\" id=\"ls-br\">-</span></div>\n"
+    "    <div>Prz&#243;d L (A1): <span class=\"val\" id=\"ls-fl-v\">-</span> V &nbsp; <span id=\"ls-fl\">-</span></div>\n"
+    "    <div>Ty&#322; L (A2): <span class=\"val\" id=\"ls-bl-v\">-</span> V &nbsp; <span id=\"ls-bl\">-</span></div>\n"
+    "    <div>Ty&#322; P (A3): <span class=\"val\" id=\"ls-br-v\">-</span> V &nbsp; <span id=\"ls-br\">-</span></div>\n"
+    "    <div>Prz&#243;d P (GPIO): <span id=\"ls-fr\">-</span></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#9881;&#65039; Silniki</h2>\n"
@@ -186,6 +193,17 @@ static const char DASHBOARD_HTML[] =
     "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"auto-azimuth-cur\">-</span>&#176;</span>\n"
     "  </div>\n"
     "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost i zatrzymuje si&#281; na przeszkodzie wykrytej lidarem (bez omijania). Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
+    "</div>\n"
+    "\n"
+    "<div class=\"card\" style=\"margin-bottom:8px\">\n"
+    "  <h2>&#9633; Test wykrywania linii</h2>\n"
+    "  <div style=\"display:flex;gap:12px;align-items:center;flex-wrap:wrap\">\n"
+    "    <button id=\"lt-btn\" onclick=\"lineTestToggle()\" style=\"font-size:1.05em;padding:12px 20px\">&#9654; Uruchom test</button>\n"
+    "    <label><input type=\"radio\" name=\"lt-dir\" value=\"forward\" checked> do przodu</label>\n"
+    "    <label><input type=\"radio\" name=\"lt-dir\" value=\"backward\"> do ty&#322;u</label>\n"
+    "    <span>Stan: <span class=\"val\" id=\"lt-state\">-</span></span>\n"
+    "  </div>\n"
+    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Pojazd porusza si&#281; skokowo: 0,3 s jazdy z pr&#281;dko&#347;ci&#261; 25 %, potem 0,3 s postoju &#8211; w p&#281;tli. Gdy <b>kt&#243;rykolwiek</b> czujnik CNY70 wykryje lini&#281;/kraw&#281;d&#378;, pojazd zatrzymuje si&#281; ca&#322;kowicie, a w monitorze pojawia si&#281; log z nazw&#261; czujnika. Test i autonomia wykluczaj&#261; si&#281;; dowolny ruch r&#281;czny lub STOP przerywa test. Kierunek zmieniaj przy zatrzymanym te&#347;cie.</div>\n"
     "</div>\n"
     "\n"
     "<div class=\"card\" style=\"margin-bottom:8px\">\n"
@@ -287,13 +305,24 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('hl-v').textContent=d.hall.voltage_v.toFixed(3);\n"
     "      document.getElementById('hl-det').innerHTML=d.hall.finish_detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
     "      document.getElementById('hl-addr').innerHTML=d.hall.initialized?('0x'+d.hall.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
+    "      if(typeof d.hall.finish_threshold_v!=='undefined'){\n"
+    "        document.getElementById('hl-thr-cur').textContent=d.hall.finish_threshold_v.toFixed(3);\n"
+    "        var hti=document.getElementById('hl-thr-in');\n"
+    "        if(document.activeElement!==hti && !hti.dataset.touched){hti.value=d.hall.finish_threshold_v.toFixed(3);}\n"
+    "      }\n"
     "    }\n"
     "    if(d.line_sensors){\n"
     "      var ls=d.line_sensors;\n"
-    "      document.getElementById('ls-fl').innerHTML=tag(ls.front_left,'WYKRYTO','BRAK');\n"
-    "      document.getElementById('ls-fr').innerHTML=tag(ls.front_right,'WYKRYTO','BRAK');\n"
-    "      document.getElementById('ls-bl').innerHTML=tag(ls.back_left,'WYKRYTO','BRAK');\n"
-    "      document.getElementById('ls-br').innerHTML=tag(ls.back_right,'WYKRYTO','BRAK');\n"
+    "      var ld=function(v){return v?'<span class=\"ok\">WYKRYTO</span>':'Nie';};\n"
+    "      if(typeof ls.front_left_v!=='undefined'){\n"
+    "        document.getElementById('ls-fl-v').textContent=ls.front_left_v.toFixed(3);\n"
+    "        document.getElementById('ls-bl-v').textContent=ls.back_left_v.toFixed(3);\n"
+    "        document.getElementById('ls-br-v').textContent=ls.back_right_v.toFixed(3);\n"
+    "      }\n"
+    "      document.getElementById('ls-fl').innerHTML=ld(ls.front_left);\n"
+    "      document.getElementById('ls-bl').innerHTML=ld(ls.back_left);\n"
+    "      document.getElementById('ls-br').innerHTML=ld(ls.back_right);\n"
+    "      document.getElementById('ls-fr').innerHTML=ld(ls.front_right);\n"
     "    }\n"
     "    if(d.motors){\n"
     "      document.getElementById('m-l').textContent=d.motors.left;\n"
@@ -304,6 +333,11 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('auto-azimuth-cur').textContent=d.autonomy.target_azimuth_deg.toFixed(0);\n"
     "      document.getElementById('od-time').textContent=d.autonomy.run_time_s.toFixed(1);\n"
     "      document.getElementById('od-energy').textContent=d.autonomy.run_energy_mwh.toFixed(1);\n"
+    "    }\n"
+    "    if(d.line_test){\n"
+    "      var lts=d.line_test.state;\n"
+    "      if(!d.line_test.running && d.line_test.hit) lts+=': '+d.line_test.hit;\n"
+    "      updateLineTest(d.line_test.running,lts,d.line_test.forward);\n"
     "    }\n"
     "  }).catch(function(){\n"
     "    document.getElementById('status-bar').innerHTML='<span class=\"err\">&#128997; Brak polaczenia</span>';\n"
@@ -319,6 +353,47 @@ static const char DASHBOARD_HTML[] =
     "function setAzimuth(){\n"
     "  var v=parseFloat(document.getElementById('auto-azimuth-in').value)||0;\n"
     "  fetch('/api/autonomy/azimuth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({azimuth_deg:v})});\n"
+    "}\n"
+    "document.getElementById('hl-thr-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "function setHallThreshold(){\n"
+    "  var v=parseFloat(document.getElementById('hl-thr-in').value);\n"
+    "  if(isNaN(v)){alert('Podaj napi\\u0119cie progowe w woltach');return;}\n"
+    "  fetch('/api/hall/threshold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({threshold_v:v})})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){if(d&&typeof d.finish_threshold_v!=='undefined'){\n"
+    "      var hti=document.getElementById('hl-thr-in');delete hti.dataset.touched;\n"
+    "      hti.value=d.finish_threshold_v.toFixed(3);\n"
+    "      document.getElementById('hl-thr-cur').textContent=d.finish_threshold_v.toFixed(3);\n"
+    "    }}).catch(function(){});\n"
+    "}\n"
+    "\n"
+    "var ltOn=false;\n"
+    "function ltDir(){\n"
+    "  var r=document.querySelector('input[name=\"lt-dir\"]:checked');\n"
+    "  return r?r.value:'forward';\n"
+    "}\n"
+    "function updateLineTest(running,st,forward){\n"
+    "  ltOn=running;\n"
+    "  var b=document.getElementById('lt-btn');\n"
+    "  b.innerHTML=running?'&#9209; Zatrzymaj test':'&#9654; Uruchom test';\n"
+    "  b.style.background=running?'#3d1212':'#21262d';\n"
+    "  b.style.borderColor=running?'#f85149':'#30363d';\n"
+    "  b.style.color=running?'#f85149':'#c9d1d9';\n"
+    "  document.getElementById('lt-state').textContent=st;\n"
+    "  document.querySelectorAll('input[name=\"lt-dir\"]').forEach(function(el){el.disabled=running;});\n"
+    "  if(!running && typeof forward!=='undefined'){\n"
+    "    var want=forward?'forward':'backward';\n"
+    "    var el=document.querySelector('input[name=\"lt-dir\"][value=\"'+want+'\"]');\n"
+    "    var ae=document.activeElement;\n"
+    "    if(el && !(ae && ae.name==='lt-dir')) el.checked=true;\n"
+    "  }\n"
+    "}\n"
+    "function lineTestToggle(){\n"
+    "  fetch('/api/line_test',{method:'POST',headers:{'Content-Type':'application/json'},\n"
+    "    body:JSON.stringify({enable:!ltOn,direction:ltDir()})})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){updateLineTest(d.running,d.state,d.forward);})\n"
+    "    .catch(function(){});\n"
     "}\n"
     "\n"
     "var autoOn=false;\n"
@@ -362,7 +437,7 @@ static const char DASHBOARD_HTML[] =
     "function clearLogs(){fetch('/api/logs/clear',{method:'POST'}).then(function(){document.getElementById('logbox').innerHTML='';});}\n"
     "\n"
     "poll();\n"
-    "setInterval(poll,1000);\n"
+    "setInterval(poll,100);\n"
     "pollLogs();\n"
     "setInterval(pollLogs,1000);\n"
     "</script>\n"
@@ -475,19 +550,24 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     /* Czujnik Halla mety (SS495A przez ADS1115) */
     ads1115_data_t hall = ads1115_get_last();
     cJSON *hallj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(hallj, "voltage_v",       (double)hall.voltage_v);
-    cJSON_AddBoolToObject(hallj,   "finish_detected", hall.finish_detected);
-    cJSON_AddNumberToObject(hallj, "address",         hall.address);
-    cJSON_AddBoolToObject(hallj,   "initialized",     hall.initialized);
+    cJSON_AddNumberToObject(hallj, "voltage_v",          (double)hall.voltage_v);
+    cJSON_AddBoolToObject(hallj,   "finish_detected",    hall.finish_detected);
+    cJSON_AddNumberToObject(hallj, "finish_threshold_v", (double)ads1115_get_finish_threshold());
+    cJSON_AddNumberToObject(hallj, "address",            hall.address);
+    cJSON_AddBoolToObject(hallj,   "initialized",        hall.initialized);
     cJSON_AddItemToObject(root, "hall", hallj);
 
-    /* Czujniki linii */
+    /* Czujniki linii (przód-L/tył-L/tył-P analogowo przez ADS1115 A1..A3,
+     * przód-P cyfrowo przez GPIO) */
     line_sensor_data_t ls = line_sensor_read();
     cJSON *line = cJSON_CreateObject();
-    cJSON_AddBoolToObject(line, "front_left",  ls.front_left);
-    cJSON_AddBoolToObject(line, "front_right", ls.front_right);
-    cJSON_AddBoolToObject(line, "back_left",   ls.back_left);
-    cJSON_AddBoolToObject(line, "back_right",  ls.back_right);
+    cJSON_AddBoolToObject(line,   "front_left",    ls.front_left);
+    cJSON_AddBoolToObject(line,   "front_right",   ls.front_right);
+    cJSON_AddBoolToObject(line,   "back_left",     ls.back_left);
+    cJSON_AddBoolToObject(line,   "back_right",    ls.back_right);
+    cJSON_AddNumberToObject(line, "front_left_v",  (double)ls.front_left_v);
+    cJSON_AddNumberToObject(line, "back_left_v",   (double)ls.back_left_v);
+    cJSON_AddNumberToObject(line, "back_right_v",  (double)ls.back_right_v);
     cJSON_AddItemToObject(root, "line_sensors", line);
 
     /* Silniki */
@@ -506,6 +586,14 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(autoj, "run_energy_mwh", (double)autonomy_get_run_energy_mwh());
     cJSON_AddItemToObject(root, "autonomy", autoj);
 
+    /* Test wykrywania linii */
+    cJSON *ltj = cJSON_CreateObject();
+    cJSON_AddBoolToObject(ltj,   "running", line_test_is_running());
+    cJSON_AddStringToObject(ltj, "state",   line_test_state_str());
+    cJSON_AddBoolToObject(ltj,   "forward", line_test_get_forward());
+    cJSON_AddStringToObject(ltj, "hit",     line_test_hit_str());
+    cJSON_AddItemToObject(root, "line_test", ltj);
+
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
@@ -519,6 +607,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
 /* POST /api/motor {"left":-100..100,"right":-100..100} - sterowanie silnikami. */
 static esp_err_t handle_motor(httpd_req_t *req) {
     autonomy_set_enabled(false);   /* ręczne sterowanie wyłącza autonomię (kill-switch) */
+    line_test_stop();              /* ...oraz test wykrywania linii */
     char buf[128];
     if (read_body(req, buf, sizeof(buf)) < 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
@@ -539,6 +628,7 @@ static esp_err_t handle_motor(httpd_req_t *req) {
 /* POST /api/motor/stop - awaryjne zatrzymanie. */
 static esp_err_t handle_motor_stop(httpd_req_t *req) {
     autonomy_set_enabled(false);   /* STOP wyłącza także autonomię */
+    line_test_stop();              /* ...oraz test wykrywania linii */
     motor_stop();
     httpd_resp_sendstr(req, "{\"ok\":true}");
     return ESP_OK;
@@ -754,6 +844,7 @@ static esp_err_t handle_autonomy(httpd_req_t *req) {
             }
         }
     }
+    if (target) line_test_stop();   /* autonomia i test wykrywania linii wykluczają się */
     autonomy_set_enabled(target);
 
     cJSON *root = cJSON_CreateObject();
@@ -797,10 +888,107 @@ static esp_err_t handle_autonomy_azimuth(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* POST /api/hall/threshold {"threshold_v":N} - ustawia próg detekcji mety
+ * czujnikiem Halla: maksymalną odchyłkę napięcia SS495A od wartości
+ * spoczynkowej (HALL_FINISH_REST_V), przy której meldowana jest meta.
+ * Wartość w woltach; moduł ADS1115 przycina ją do sensownego zakresu.
+ * Odpowiada aktualnie obowiązującym progiem (po przycięciu). */
+static esp_err_t handle_hall_threshold(httpd_req_t *req) {
+    if (req->content_len <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing body");
+        return ESP_FAIL;
+    }
+    char buf[64];
+    if (read_body(req, buf, sizeof(buf)) <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
+        return ESP_FAIL;
+    }
+    cJSON *j = cJSON_Parse(buf);
+    if (!j) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        return ESP_FAIL;
+    }
+    cJSON *t = cJSON_GetObjectItem(j, "threshold_v");
+    if (!cJSON_IsNumber(t)) {
+        cJSON_Delete(j);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing threshold_v");
+        return ESP_FAIL;
+    }
+    ads1115_set_finish_threshold((float)t->valuedouble);
+    cJSON_Delete(j);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "finish_threshold_v", (double)ads1115_get_finish_threshold());
+    char *s = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, s);
+    free(s);
+    return ESP_OK;
+}
+
+/* POST /api/line_test - test wykrywania linii czujnikami odbiciowymi. Ciało:
+ *   {"enable":true/false}          - włącz/wyłącz (akceptuje też "run");
+ *                                    brak ciała = przełącz stan
+ *   {"direction":"forward"/"backward"} lub {"forward":true/false}
+ *                                  - kierunek jazdy (uwzględniany przy starcie)
+ * Włączenie testu wyłącza autonomię (i odwrotnie - patrz handle_autonomy). */
+static esp_err_t handle_line_test(httpd_req_t *req) {
+    bool target  = !line_test_is_running();   /* domyślnie: przełącz */
+    bool forward = line_test_get_forward();
+    if (req->content_len > 0) {
+        char buf[128];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *e = cJSON_GetObjectItem(j, "enable");
+                if (!e) e = cJSON_GetObjectItem(j, "run");
+                if (e) target = cJSON_IsTrue(e) ||
+                                (cJSON_IsNumber(e) && e->valuedouble != 0);
+
+                cJSON *f = cJSON_GetObjectItem(j, "forward");
+                if (f) forward = cJSON_IsTrue(f) ||
+                                 (cJSON_IsNumber(f) && f->valuedouble != 0);
+
+                cJSON *dir = cJSON_GetObjectItem(j, "direction");
+                if (cJSON_IsString(dir) && dir->valuestring) {
+                    if (strcmp(dir->valuestring, "backward") == 0 ||
+                        strcmp(dir->valuestring, "back") == 0 ||
+                        strcmp(dir->valuestring, "tyl") == 0)
+                        forward = false;
+                    else if (strcmp(dir->valuestring, "forward") == 0 ||
+                             strcmp(dir->valuestring, "przod") == 0)
+                        forward = true;
+                }
+                cJSON_Delete(j);
+            }
+        }
+    }
+
+    if (target) {
+        autonomy_set_enabled(false);   /* test i autonomia wykluczają się */
+        line_test_start(forward);
+    } else {
+        line_test_stop();
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root,   "running", line_test_is_running());
+    cJSON_AddStringToObject(root, "state",   line_test_state_str());
+    cJSON_AddBoolToObject(root,   "forward", line_test_get_forward());
+    cJSON_AddStringToObject(root, "hit",     line_test_hit_str());
+    char *s = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, s);
+    free(s);
+    return ESP_OK;
+}
+
 esp_err_t http_server_start(void) {
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port        = 80;
-    cfg.max_uri_handlers   = 20;
+    cfg.max_uri_handlers   = 22;
     cfg.stack_size         = 8192;
 
     if (httpd_start(&s_server, &cfg) != ESP_OK) {
@@ -826,6 +1014,8 @@ esp_err_t http_server_start(void) {
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
         { .uri="/api/autonomy/azimuth", .method=HTTP_POST, .handler=handle_autonomy_azimuth },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
+        { .uri="/api/hall/threshold",   .method=HTTP_POST, .handler=handle_hall_threshold },
+        { .uri="/api/line_test",        .method=HTTP_POST, .handler=handle_line_test },
     };
 
     int n_routes = sizeof(routes) / sizeof(routes[0]);

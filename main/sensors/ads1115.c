@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <math.h>
 
 static const char *TAG = "ADS1115";
 
@@ -11,16 +12,25 @@ static const char *TAG = "ADS1115";
 #define ADS1115_REG_CONVERSION  0x00
 #define ADS1115_REG_CONFIG      0x01
 
-/* Konfiguracja: single-shot start (OS=1), kanał A0 względem GND (MUX=100),
- * wzmocnienie PGA=+-4,096V (FSR poniżej), tryb single-shot (MODE=1),
- * 128 próbek/s (DR=100), komparator wyłączony (COMP_QUE=11).
- * Zmień PGA (patrz datasheet ADS1115), jeśli napięcie SS495A przy realnym
+/* Konfiguracja: single-shot start (OS=1), pojedynczy kanał względem GND
+ * (MUX w bitach [14:12]), wzmocnienie PGA=+-4,096V (FSR poniżej), tryb
+ * single-shot (MODE=1), 128 próbek/s (DR=100), komparator wyłączony
+ * (COMP_QUE=11). Kolejne kanały różnią się tylko polem MUX:
+ *   A0 -> 0xC383, A1 -> 0xD383, A2 -> 0xE383, A3 -> 0xF383.
+ * Zmień PGA (patrz datasheet ADS1115), jeśli któreś napięcie przy realnym
  * zasilaniu czujnika wychodzi poza zakres +-4,096V. */
 #define ADS1115_CONFIG_AIN0     0xC383
+#define ADS1115_CONFIG_AIN1     0xD383
+#define ADS1115_CONFIG_AIN2     0xE383
+#define ADS1115_CONFIG_AIN3     0xF383
 #define ADS1115_FSR_V           4.096f
 #define ADS1115_CONV_DELAY_MS   10      /* > 1/128 s przy 128 probek/s, z zapasem */
 
 static ads1115_data_t s_last = {0};
+
+/* Próg detekcji mety (odchyłka napięcia od spoczynku), regulowany z
+ * dashboardu przez ads1115_set_finish_threshold(). Domyślnie z config.h. */
+static float s_finish_threshold_v = HALL_FINISH_THRESHOLD_V;
 
 /* Zapis rejestru 16-bitowego w kolejności big-endian (jak INA219). */
 static esp_err_t ads_write16(uint8_t reg, uint16_t val) {
@@ -71,18 +81,16 @@ esp_err_t ads1115_init(void) {
     }
     s_last.address     = ADS1115_ADDR;
     s_last.initialized = true;
-    ESP_LOGI(TAG, "ADS1115 OK pod adresem 0x%02X (kanal A0, FSR=+-%.3fV)",
+    ESP_LOGI(TAG, "ADS1115 OK pod adresem 0x%02X (A0=Hall mety, A1..A3=czujniki linii, FSR=+-%.3fV)",
              ADS1115_ADDR, (double)ADS1115_FSR_V);
     return ESP_OK;
 }
 
-esp_err_t ads1115_read(ads1115_data_t *out) {
-    if (!s_last.initialized) return ESP_ERR_INVALID_STATE;
-
-    /* Wyzwól pojedynczy pomiar (single-shot) i poczekaj na jego zakończenie -
-     * ADS1115 zasypia między pomiarami w tym trybie, więc każdy odczyt
-     * wymaga świeżego startu, nie tylko odczytu rejestru konwersji. */
-    if (ads_write16(ADS1115_REG_CONFIG, ADS1115_CONFIG_AIN0) != ESP_OK) return ESP_FAIL;
+/* Wyzwala pojedynczy pomiar (single-shot) na zadanym kanale, czeka na jego
+ * zakończenie i przelicza wynik na napięcie [V]. ADS1115 zasypia między
+ * pomiarami w tym trybie, więc każdy odczyt wymaga świeżego startu. */
+static esp_err_t ads_measure(uint16_t cfg, float *out_v) {
+    if (ads_write16(ADS1115_REG_CONFIG, cfg) != ESP_OK) return ESP_FAIL;
     vTaskDelay(pdMS_TO_TICKS(ADS1115_CONV_DELAY_MS));
 
     uint16_t raw = 0;
@@ -90,12 +98,40 @@ esp_err_t ads1115_read(ads1115_data_t *out) {
 
     /* Wynik to liczba ze znakiem (U2), waga LSB = FSR / 32768. */
     int16_t signed_raw = (int16_t)raw;
-    s_last.voltage_v = (float)signed_raw * (ADS1115_FSR_V / 32768.0f);
-    s_last.finish_detected = (s_last.voltage_v <= HALL_FINISH_LOW_V) ||
-                              (s_last.voltage_v >= HALL_FINISH_HIGH_V);
+    *out_v = (float)signed_raw * (ADS1115_FSR_V / 32768.0f);
+    return ESP_OK;
+}
+
+esp_err_t ads1115_read(ads1115_data_t *out) {
+    if (!s_last.initialized) return ESP_ERR_INVALID_STATE;
+
+    /* A0 - czujnik Halla mety (krytyczny: błąd odczytu przerywa cykl). */
+    float v;
+    if (ads_measure(ADS1115_CONFIG_AIN0, &v) != ESP_OK) return ESP_FAIL;
+    s_last.voltage_v = v;
+    s_last.finish_detected =
+        fabsf(s_last.voltage_v - HALL_FINISH_REST_V) >= s_finish_threshold_v;
+
+    /* A1..A3 - czujniki odbiciowe linii (best-effort: pojedynczy błąd
+     * zostawia poprzednią wartość, nie przerywa całego odczytu). */
+    if (ads_measure(ADS1115_CONFIG_AIN1, &v) == ESP_OK) s_last.line_fl_v = v;
+    if (ads_measure(ADS1115_CONFIG_AIN2, &v) == ESP_OK) s_last.line_bl_v = v;
+    if (ads_measure(ADS1115_CONFIG_AIN3, &v) == ESP_OK) s_last.line_br_v = v;
 
     if (out) *out = s_last;
     return ESP_OK;
 }
 
 ads1115_data_t ads1115_get_last(void) { return s_last; }
+
+void ads1115_set_finish_threshold(float volts) {
+    /* Sensowny zakres: od 1 mV (praktycznie zawsze wykrywa) do pełnej skali
+     * kanału. Wartości spoza zakresu przycinamy zamiast odrzucać. */
+    if (volts < 0.001f)        volts = 0.001f;
+    if (volts > ADS1115_FSR_V) volts = ADS1115_FSR_V;
+    s_finish_threshold_v = volts;
+    ESP_LOGI(TAG, "Prog detekcji mety (Hall) ustawiony na +-%.3f V wzgledem %.3f V",
+             (double)volts, (double)HALL_FINISH_REST_V);
+}
+
+float ads1115_get_finish_threshold(void) { return s_finish_threshold_v; }

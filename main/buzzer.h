@@ -40,8 +40,12 @@ void buzzer_play_melody(const buzzer_note_t *notes, size_t count,
  * domena publiczna) - w nieskończonej pętli (przycisk "Muzyka" na dashboardzie). */
 void buzzer_play_ice_cream_song(void);
 
-/* Ten sam jingle, ale odtworzony tylko raz (np. sygnał wykrycia mety). */
+/* Ten sam jingle, ale odtworzony tylko raz. */
 void buzzer_play_ice_cream_song_once(void);
+
+/* Pojedynczy, jednostajny ton 2 s - sygnał wykrycia mety (czujnik Halla).
+ * Zastępuje wcześniejszy jingle: jeden wyraźny dźwięk zamiast melodii. */
+void buzzer_play_finish_tone(void);
 
 /* Gama C-dur w górę, odtworzona raz - sygnał wykrycia obiektu cieplnego
  * (różny od jinglu mety, żeby oba zdarzenia rozróżnić po dźwięku). */
