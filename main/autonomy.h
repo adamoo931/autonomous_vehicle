@@ -49,12 +49,29 @@ bool autonomy_is_enabled(void);
  * "Zatrzymany (meta)". */
 const char *autonomy_state_str(void);
 
-/* Zgrubny azymut start->meta [stopnie, 0..360), wpisywany z dashboardu
- * przed przejazdem. Na razie tylko przechowywany - wykorzysta go przyszła
- * logika nawigacji (etap 2) przy wyborze kierunku spośród kilku otwartych
- * szczelin. */
-void  autonomy_set_target_azimuth(float deg);
-float autonomy_get_target_azimuth(void);
+/* --- Krok 2: podgląd na żywo estymatora kursu z żyroskopu. Kurs = całka
+ * (gyro_z_filt - bias) z rzeczywistym Δt, liczona w pętli autonomii
+ * NIEZALEŻNIE od tego, czy autonomia jest włączona (obserwowalność bez
+ * ruszania silników). Bias mierzony przez ~1 s bezruchu na starcie każdego
+ * przejazdu (stan "Kalibracja żyroskopu"); kurs wtedy zerowany. Nadal NIE
+ * używane w sterowaniu - to Krok 3. */
+float autonomy_get_heading_deg(void);       /* scałkowany kurs względny [°], zawinięty (-180,180] */
+float autonomy_get_gyro_z_dps(void);        /* surowa prędkość kątowa yaw (gyro_z) [°/s] */
+float autonomy_get_gyro_z_filt_dps(void);   /* gyro_z po filtrze EMA [°/s] */
+float autonomy_get_gyro_bias_dps(void);     /* zmierzony bias gyro_z [°/s] (0 przed 1. kalibracją) */
+
+/* --- Krok 3/4: zadany kurs (cel regulatora utrzymania kursu w ST_CRUISE),
+ * względem kierunku startowego. + = w lewo. Ustawiany z dashboardu
+ * (POST /api/autonomy/heading). Przycinany do ±90°. Do testów jazdy prosto
+ * ustaw 0. Domyślnie ~18° (namiar start->meta). */
+float autonomy_get_heading_target_deg(void);
+void  autonomy_set_heading_target_deg(float deg);
+
+/* Kopiuje 8 minimalnych odległości sektorowych LIDAR [mm] do out[8]
+ * (0 = brak echa / kierunek otwarty). Kolejność: przód, przód-L, lewo,
+ * tył-L, tył, tył-P, prawo, przód-P (patrz enum SEC_* w autonomy.c).
+ * Kalibracja przodu LIDAR dojdzie w Kroku 6 - na razie 0° = surowy przód. */
+void autonomy_get_lidar_sectors_mm(int16_t out[8]);
 
 /* Moc silników [% mocy, 0..100] przy jeździe na wprost i przy cofaniu
  * (ST_CRUISE/ST_LINE_BACKUP w autonomy.c) - wpisywana z dashboardu.
@@ -73,24 +90,31 @@ float autonomy_get_run_energy_mwh(void);
  *  LOG PRZEJAZDU (do pobrania jako CSV przez http_server.c)
  * ===================================================================== */
 
-/* Pojedynczy próbkowany rekord przejazdu (co STATUS_LOG_MS). Odległości
- * w mm, gdzie D_OPEN_MM (autonomy.c) oznacza "brak echa / otwarte".
- * Temperatury są mnożone *10 (np. 235 = 23.5 st. C), aby uniknąć typów
- * zmiennoprzecinkowych i zmniejszyć rozmiar rekordu - dzięki czemu w
- * buforze RAM mieści się więcej próbek. */
+/* Pojedynczy próbkowany rekord przejazdu (co STATUS_LOG_MS). Wartości
+ * skalowane *10 / w mV, aby uniknąć typów zmiennoprzecinkowych i zmniejszyć
+ * rozmiar rekordu. Odległości LIDAR w mm, 0 = brak echa / kierunek otwarty.
+ *
+ * Krok 1: doszły surowe prędkości kątowe (3 osie żyroskopu - do ustalenia,
+ * która oś to yaw), scałkowany kurs względny (surowy), 8 sektorów LIDAR i
+ * napięcia 3 czujników linii - komplet sygnałów decyzyjnych dla kolejnych
+ * kroków. Stare pola LIDAR (front, diag L/R, side L/R, best_open_deg)
+ * zastąpiono tablicą lidar_mm[8]. */
 typedef struct {
     uint32_t t_ms;          /* czas od startu przejazdu [ms] */
-    int16_t  front_mm;
-    int16_t  diag_l_mm;
-    int16_t  diag_r_mm;
-    int16_t  side_l_mm;
-    int16_t  side_r_mm;
+    uint8_t  state;         /* wartość enum stanu - patrz autonomy_log_state_name() */
     int8_t   motor_l;       /* -100..100 [%] */
     int8_t   motor_r;
-    int16_t  obj_temp_x10;
-    int16_t  amb_temp_x10;
-    int16_t  best_open_deg; /* kąt najbardziej otwartego kierunku dookoła [st], + = lewo */
-    uint8_t  state;         /* wartość enum stanu - patrz autonomy_log_state_name() */
+    int16_t  gyro_x_x10;    /* prędkość kątowa X [°/s] * 10 (surowa z IMU) */
+    int16_t  gyro_y_x10;    /* prędkość kątowa Y [°/s] * 10 */
+    int16_t  gyro_z_x10;    /* prędkość kątowa Z (yaw) [°/s] * 10 - surowa */
+    int16_t  gyro_zf_x10;   /* gyro_z po filtrze EMA [°/s] * 10 (Krok 2) */
+    int16_t  heading_x10;   /* scałkowany kurs względny [°] * 10, zawinięty (-180,180]; po odjęciu biasu (Krok 2) */
+    int16_t  lidar_mm[8];   /* min. odległość w 8 sektorach [mm]; 0 = otwarte. Kolejność jak w SEC_* */
+    int16_t  line_fl_mv;    /* czujnik linii przód-lewy [mV] */
+    int16_t  line_bl_mv;    /* tył-lewy [mV] */
+    int16_t  line_br_mv;    /* tył-prawy [mV] */
+    int16_t  obj_temp_x10;  /* pirometr: temperatura obiektu [°C] * 10 */
+    int16_t  amb_temp_x10;  /* pirometr: temperatura otoczenia [°C] * 10 */
 } autonomy_log_rec_t;
 
 /* Liczba rekordów bieżącego/ostatniego przejazdu (zerowana przy starcie nowego). */

@@ -5,10 +5,13 @@
 #include "ina219.h"
 #include "line_sensor.h"
 #include "ads1115.h"
+#include "imu.h"
+#include "lidar.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include <math.h>
 
 static const char *TAG = "AUTO";
 
@@ -42,10 +45,11 @@ static const char *TAG = "AUTO";
  *  ponownego wlaczenia.
  *
  *  LOG PRZEJAZDU: co STATUS_LOG_MS do RAM zapisywany jest kompaktowy
- *  rekord (stan, moc silnikow, temperatury z pirometru). Bufor zerowany
- *  na starcie kazdego przejazdu, do pobrania jako CSV pod
- *  GET /api/autonomy/log.csv. Pola LIDAR w rekordzie nie sa uzywane w
- *  tej wersji (zapisywane jako 0).
+ *  rekord. Krok 1 dolozyl komplet sygnalow decyzyjnych: 3 osie zyroskopu,
+ *  scalkowany kurs wzgledny (surowy - patrz nizej), 8 sektorow LIDAR i
+ *  napiecia 3 czujnikow linii; dochodza tez stan, moc silnikow i
+ *  temperatury z pirometru. Bufor zerowany na starcie kazdego przejazdu,
+ *  do pobrania jako CSV pod GET /api/autonomy/log.csv.
  * ===================================================================== */
 
 /* Moc silnikow [% mocy] przy jezdzie na wprost i przy cofaniu (ta wersja:
@@ -70,13 +74,64 @@ static const char *TAG = "AUTO";
 #define LOOP_MS          50      /* 20 Hz - petla sterowania */
 #define STATUS_LOG_MS   300      /* ~3,3 Hz - log konsoli + rekord CSV */
 
-/* Bufor logu przejazdu (RAM, do pobrania jako CSV). 2000 rekordow po
- * ~24 B ~= 47 KB; przy 300 ms daje ok. 10 minut nagrywania. */
-#define AUTO_LOG_MAX   2000
+/* --- Krok 2: estymator kursu z zyroskopu ---
+ * Na starcie przejazdu ~BIAS_CAL_MS bezruchu -> usrednienie gyro_z = bias
+ * (w tescie Kroku 1 zmierzono ~0,8 °/s). Potem calkowanie (gyro_z - bias),
+ * z EMA na predkosc katowa (szum ±10 °/s od pracujacych silnikow).
+ * Znak potwierdzony w Kroku 1: +gyro_z = obrot w LEWO (CCW) = +kurs. */
+#define BIAS_CAL_MS           1000   /* czas usredniania biasu na starcie [ms] */
+#define BIAS_CAL_MAX_SPREAD    4.0f  /* max-min gyro_z podczas kal. [°/s]; wiecej => ostrzezenie */
+#define HEADING_SIGN         (+1.0f) /* odwroc na -1, jesli kierunek kursu wyjdzie odwrotny */
+#define HEADING_LPF_ALPHA      0.30f /* EMA na predkosc katowa przed calkowaniem */
+#define HEADING_DT_MAX_S       0.30f /* dluzsza przerwa w petli => pomijamy calkowanie (unik skoku) */
+
+/* --- Krok 3: utrzymanie kursu (regulator P) w ST_CRUISE ---
+ * turn = KP_HEADING * blad_kursu + DRIVE_TRIM, ograniczone do +/-TURN_MAX;
+ * dodawane roznicowo do kol (turn>0 => skret w LEWO: lewe kolo wolniej).
+ * DRIVE_TRIM to staly offset feed-forward kompensujacy konstrukcyjny znos
+ * (~1,6 °/s w prawo przy 35 %) - zmierzony w tescie Kroku 3. */
+#define KP_HEADING     1.8f     /* [% roznicy mocy / stopien bledu kursu] (Krok 3b: 1.0 -> 1.8) */
+#define TURN_MAX      25         /* [%] limit roznicy mocy kol od regulatora */
+#define DRIVE_TRIM     3.0f     /* [%] staly offset roznicowy (+ = w lewo); Krok 3b: zmierzony
+                                 * turn ustalony ~+3 % kompensujacy konstrukcyjny znos w prawo */
+
+/* --- Krok 4: zadany kurs (cel regulatora) wzgledem kierunku startowego.
+ * + = w LEWO (patrz test Kroku 1). Domyslnie HEADING_TARGET_DEFAULT ~ namiar
+ * start->meta (cel jest ~18° w lewo od osi toru); ustawiany z dashboardu.
+ * Do testow jazdy prosto ustaw 0. Nie zapisywany w NVS. */
+#define HEADING_TARGET_DEFAULT   18.0f
+#define HEADING_TARGET_MAX       90.0f  /* zakres przycinania [+/-°] */
+
+/* Bufor logu przejazdu (RAM, do pobrania jako CSV). Rekord ~44 B;
+ * 1100 * 44 ~= 48 KB - tyle samo co poprzedni dzialajacy bufor (2000 * 24 B),
+ * wiec bez wzrostu zajetosci .bss. Przy 300 ms daje ok. 5,5 min nagrywania. */
+#define AUTO_LOG_MAX   1100
+
+/* --- Krok 1: sektory LIDAR do telemetrii ---
+ * LID_MIRROR=1 ustalone w tescie Kroku 1: surowy kat LIDAR rosnie w strone
+ * fizycznie PRAWEJ, wiec bez odbicia sektory L/P byly zamienione (karton
+ * przod-lewo trafial do sektora przod-prawy). LID_FRONT_DEG (drobny offset
+ * obrotu 0 = przod robota) potwierdzony zgrubnie - precyzyjny dobor w Kroku 6. */
+#define LID_FRONT_DEG   0
+#define LID_MIRROR      1
+
+enum { SEC_FRONT, SEC_FRONT_L, SEC_LEFT, SEC_REAR_L,
+       SEC_REAR,  SEC_REAR_R,  SEC_RIGHT, SEC_FRONT_R, SEC_COUNT };
+static const int s_sec_center[SEC_COUNT] = {  0,  45,  90, 135, 180, -135, -90, -45 };
+static const int s_sec_half[SEC_COUNT]   = { 15,  20,  20,  20,  15,   20,  20,  20 };
+
+/* Min. odleglosc [mm] w luku wzgledem przodu robota; 0 = brak echa (otwarte). */
+static uint16_t lidar_arc_mm(int rel_center, int half) {
+    int s = LID_MIRROR ? -1 : 1;
+    int c = (LID_FRONT_DEG + s * rel_center) % 360;
+    if (c < 0) c += 360;
+    return lidar_min_in_arc(c, half);
+}
 
 /* Stany maszyny sterujacej. */
 typedef enum {
     ST_IDLE,          /* wylaczony / bezczynny */
+    ST_GYRO_CAL,      /* start przejazdu - bezruch, usrednianie biasu gyro_z (Krok 2) */
     ST_CRUISE,        /* jazda na wprost */
     ST_LINE_WAIT,     /* linia wykryta - postoj i oczekiwanie na potwierdzenie mety Hallem */
     ST_LINE_BACKUP,   /* to nie meta - cofanie */
@@ -92,13 +147,30 @@ static uint32_t s_state_t = 0;   /* ms wejscia w biezacy stan */
 static bool     s_stopped = false;
 static uint32_t s_log_t   = 0;   /* ms ostatniego szczegolowego logu */
 
-/* Zgrubny azymut start->meta z dashboardu. W tej wersji tylko
- * przechowywany (dashboard ma pole) - jazda go nie wykorzystuje. */
-static float s_target_azimuth_deg = 0.0f;
+/* Zadany kurs wzgledny dla regulatora utrzymania kursu w ST_CRUISE
+ * (Krok 3/4). + = w lewo. Ustawiany z dashboardu (autonomy_set_heading_target_deg). */
+static volatile float s_heading_target_deg = HEADING_TARGET_DEFAULT;
 
 /* Moc silnikow [%] przy jezdzie na wprost/do tylu - ustawiana z
  * dashboardu (patrz autonomy_set_speed_pct()). */
 static volatile int s_speed_pct = SPEED_PCT_DEFAULT;
+
+/* --- Krok 2: estymator kursu z zyroskopu (nadal NIE uzywany w sterowaniu -
+ * to Krok 3; na razie tylko obserwowalnosc). Calkowanie (gyro_z_filt - bias)
+ * z rzeczywistym dt (z now_ms). Liczone w petli NIEZALEZNIE od s_enabled,
+ * zeby dalo sie je czytac z dashboardu bez ruszania silnikow; kurs zerowany
+ * i bias mierzony na starcie kazdego przejazdu (ST_GYRO_CAL). */
+static volatile float s_heading_deg   = 0.0f;   /* scalkowany kurs wzgledny [°], (-180,180] */
+static volatile float s_gyro_z_dps    = 0.0f;   /* ostatni surowy gyro_z [°/s] */
+static volatile float s_gyro_z_filt   = 0.0f;   /* gyro_z po EMA [°/s] */
+static volatile float s_gyro_bias     = 0.0f;   /* zmierzony bias gyro_z [°/s] (0 przed 1. kalibracja) */
+static uint32_t       s_head_last_ms  = 0;
+
+/* Akumulatory kalibracji biasu (ST_GYRO_CAL). */
+static float    s_bias_sum = 0.0f;
+static int      s_bias_n   = 0;
+static float    s_bias_min = 0.0f;
+static float    s_bias_max = 0.0f;
 
 /* Log przejazdu w RAM (eksportowany jako CSV). */
 static autonomy_log_rec_t s_log[AUTO_LOG_MAX];
@@ -113,6 +185,7 @@ static float    s_run_energy_mwh = 0.0f;
 static const char *state_name(st_t s) {
     switch (s) {
         case ST_IDLE:        return "Bezczynny";
+        case ST_GYRO_CAL:    return "Kalibracja zyroskopu";
         case ST_CRUISE:      return "Jazda";
         case ST_LINE_WAIT:   return "Linia - sprawdzam mete";
         case ST_LINE_BACKUP: return "Cofanie (nie meta)";
@@ -127,13 +200,45 @@ static inline uint32_t now_ms(void) {
 }
 static inline void enter(st_t s) { s_state = s; s_state_t = now_ms(); }
 
+/* Krok 3: blad kursu (cel - biezacy), znormalizowany do (-180,180].
+ * Dodatni => cel jest w lewo od biezacego kursu => trzeba skrecic w lewo. */
+static inline float heading_err(void) {
+    float e = s_heading_target_deg - s_heading_deg;
+    while (e > 180.0f)   e -= 360.0f;
+    while (e <= -180.0f) e += 360.0f;
+    return e;
+}
+
 /* Zamraza czas trwania biezacego przejazdu (dashboard ma pokazywac czas
  * do tego momentu, nie licznik biegnacy dalej). Wolane tylko przy
  * s_enabled==true, wiec nadpisuje raz na przejazd. */
 static inline void stop_run(void) { s_run_elapsed_ms = now_ms() - s_run_t0; }
 
+/* --- Krok 1: migawka telemetrii ---
+ * Zbierana raz na takt logu i uzywana zarowno do rekordu CSV, jak i do
+ * linii statusu w konsoli - zeby nie liczyc luku LIDAR / nie czytac
+ * czujnikow dwa razy. Wszystkie odczyty sa nieblokujace (dane z cache). */
+typedef struct {
+    imu_data_t         imu;
+    line_sensor_data_t line;
+    int16_t            sec_mm[SEC_COUNT];
+    float              heading_deg;
+    float              gyro_z_filt;
+} telem_t;
+
+static telem_t telem_snapshot(void) {
+    telem_t t;
+    t.imu  = imu_get_last();
+    t.line = line_sensor_read();
+    for (int i = 0; i < SEC_COUNT; i++)
+        t.sec_mm[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
+    t.heading_deg = s_heading_deg;
+    t.gyro_z_filt = s_gyro_z_filt;
+    return t;
+}
+
 /* Dopisuje jeden rekord do logu przejazdu (RAM). Wolane co STATUS_LOG_MS. */
-static void record_sample(uint32_t now, pyrometer_data_t pd) {
+static void record_sample(uint32_t now, pyrometer_data_t pd, const telem_t *tl) {
     if (s_log_n >= AUTO_LOG_MAX) {
         if (!s_log_full_warned) {
             s_log_full_warned = true;
@@ -143,18 +248,21 @@ static void record_sample(uint32_t now, pyrometer_data_t pd) {
         return;
     }
     autonomy_log_rec_t *r = &s_log[s_log_n++];
-    r->t_ms          = now - s_run_t0;
-    r->front_mm      = 0;
-    r->diag_l_mm     = 0;
-    r->diag_r_mm     = 0;
-    r->side_l_mm     = 0;
-    r->side_r_mm     = 0;
-    r->motor_l       = (int8_t)motor_get_left_speed();
-    r->motor_r       = (int8_t)motor_get_right_speed();
-    r->obj_temp_x10  = (int16_t)(pd.object_temp  * 10.0f);
-    r->amb_temp_x10  = (int16_t)(pd.ambient_temp * 10.0f);
-    r->best_open_deg = 0;
-    r->state         = (uint8_t)s_state;
+    r->t_ms         = now - s_run_t0;
+    r->state        = (uint8_t)s_state;
+    r->motor_l      = (int8_t)motor_get_left_speed();
+    r->motor_r      = (int8_t)motor_get_right_speed();
+    r->gyro_x_x10   = (int16_t)(tl->imu.gyro_x * 10.0f);
+    r->gyro_y_x10   = (int16_t)(tl->imu.gyro_y * 10.0f);
+    r->gyro_z_x10   = (int16_t)(tl->imu.gyro_z * 10.0f);
+    r->gyro_zf_x10  = (int16_t)(tl->gyro_z_filt * 10.0f);
+    r->heading_x10  = (int16_t)(tl->heading_deg * 10.0f);
+    for (int i = 0; i < SEC_COUNT; i++) r->lidar_mm[i] = tl->sec_mm[i];
+    r->line_fl_mv   = (int16_t)(tl->line.front_left_v * 1000.0f);
+    r->line_bl_mv   = (int16_t)(tl->line.back_left_v  * 1000.0f);
+    r->line_br_mv   = (int16_t)(tl->line.back_right_v * 1000.0f);
+    r->obj_temp_x10 = (int16_t)(pd.object_temp  * 10.0f);
+    r->amb_temp_x10 = (int16_t)(pd.ambient_temp * 10.0f);
 }
 
 /* Wykrycie linii toru na potrzeby autonomii - bazuje WYLACZNIE na trzech
@@ -166,6 +274,17 @@ static void record_sample(uint32_t now, pyrometer_data_t pd) {
 static inline bool track_line_detected(void) {
     line_sensor_data_t d = line_sensor_read();
     return d.front_left || d.back_left || d.back_right;
+}
+
+/* Krok 2: rozpoczyna kalibracje biasu gyro_z - zeruje akumulatory i kurs,
+ * wchodzi w ST_GYRO_CAL (silniki stoja, patrz obsluga stanu). */
+static void start_gyro_cal(void) {
+    s_bias_sum    = 0.0f;
+    s_bias_n      = 0;
+    s_bias_min    =  1e9f;
+    s_bias_max    = -1e9f;
+    s_heading_deg = 0.0f;
+    enter(ST_GYRO_CAL);
 }
 
 /* Konczy przejazd: zatrzymuje silniki, zamraza czas, wylacza autonomie i
@@ -183,6 +302,29 @@ static void autonomy_task(void *arg) {
     (void)arg;
 
     while (1) {
+        /* --- Krok 2: estymator kursu z zyroskopu - liczony ZAWSZE, takze przy
+         * wylaczonej autonomii (obserwowalnosc bez ruszania silnikow).
+         * Filtr EMA na predkosc katowa (szum od silnikow), potem calkowanie
+         * (gyro_z_filt - bias) z rzeczywistym dt. Podczas ST_GYRO_CAL kursu
+         * nie calkujemy (bias jeszcze nieznany) - filtr biegnie dalej. */
+        {
+            uint32_t   hnow = now_ms();
+            imu_data_t im   = imu_get_last();
+            s_gyro_z_dps  = im.gyro_z;
+            s_gyro_z_filt += HEADING_LPF_ALPHA * (im.gyro_z - s_gyro_z_filt);
+            if (s_head_last_ms != 0 && s_state != ST_GYRO_CAL) {
+                float dt = (hnow - s_head_last_ms) / 1000.0f;
+                if (dt > 0.0f && dt < HEADING_DT_MAX_S) {
+                    float h = s_heading_deg
+                            + HEADING_SIGN * (s_gyro_z_filt - s_gyro_bias) * dt;
+                    while (h > 180.0f)   h -= 360.0f;
+                    while (h <= -180.0f) h += 360.0f;
+                    s_heading_deg = h;
+                }
+            }
+            s_head_last_ms = hnow;
+        }
+
         /* Tryb wylaczony: pilnuj, by silniki staly. Stan koncowy
          * ST_STOP_FINISH zostaje widoczny na dashboardzie do ponownego
          * wlaczenia (zeby bylo wiadomo, ze pojazd dojechal do mety);
@@ -206,10 +348,20 @@ static void autonomy_task(void *arg) {
         /* Szczegolowy log statusu (konsola) oraz rekord do CSV. */
         if (now - s_log_t >= STATUS_LOG_MS) {
             s_log_t = now;
-            ESP_LOGI(TAG, "[%s] silniki L=%d%% R=%d%% | termo: obiekt=%.1fC otoczenie=%.1fC",
-                     state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
-                     pd.object_temp, pd.ambient_temp);
-            record_sample(now, pd);
+            telem_t tl = telem_snapshot();
+            ESP_LOGI(TAG,
+                "[%s] L=%d%% R=%d%% | kurs=%.1f cel=%.1f err=%.1f | gyroZ raw/filt=%.1f/%.1f bias=%.2f /s | "
+                "LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
+                "linia PL/TL/TP=%d/%d/%d mV",
+                state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
+                tl.heading_deg, s_heading_target_deg, heading_err(),
+                tl.imu.gyro_z, tl.gyro_z_filt, s_gyro_bias,
+                tl.sec_mm[SEC_FRONT], tl.sec_mm[SEC_FRONT_L], tl.sec_mm[SEC_LEFT],
+                tl.sec_mm[SEC_REAR_L], tl.sec_mm[SEC_REAR], tl.sec_mm[SEC_REAR_R],
+                tl.sec_mm[SEC_RIGHT], tl.sec_mm[SEC_FRONT_R],
+                (int)(tl.line.front_left_v * 1000.0f), (int)(tl.line.back_left_v * 1000.0f),
+                (int)(tl.line.back_right_v * 1000.0f));
+            record_sample(now, pd, &tl);
         }
 
         /* Meta (Hall) ma bezwzgledny priorytet - potwierdza mete
@@ -225,8 +377,34 @@ static void autonomy_task(void *arg) {
         switch (s_state) {
 
         case ST_IDLE:
-            enter(ST_CRUISE);
+            /* Nie powinno wystapic przy s_enabled (set_enabled wchodzi
+             * prosto w ST_GYRO_CAL) - fallback: zrob kalibracje i jedz. */
+            start_gyro_cal();
             break;
+
+        case ST_GYRO_CAL: {
+            /* Bezruch - usredniaj gyro_z. Silniki stoja. */
+            motor_stop();
+            imu_data_t im = imu_get_last();
+            s_bias_sum += im.gyro_z;
+            s_bias_n++;
+            if (im.gyro_z < s_bias_min) s_bias_min = im.gyro_z;
+            if (im.gyro_z > s_bias_max) s_bias_max = im.gyro_z;
+            if (now - s_state_t >= BIAS_CAL_MS) {
+                s_gyro_bias = (s_bias_n > 0) ? (s_bias_sum / (float)s_bias_n) : 0.0f;
+                float spread = s_bias_max - s_bias_min;
+                if (spread > BIAS_CAL_MAX_SPREAD)
+                    ESP_LOGW(TAG, "Kalibracja zyra: duzy rozrzut %.1f °/s (robot sie ruszal?) - "
+                                  "bias %.2f moze byc niedokladny.", spread, s_gyro_bias);
+                else
+                    ESP_LOGI(TAG, "Kalibracja zyra OK: bias gyro_z = %.2f °/s "
+                                  "(rozrzut %.1f, %d probek). Kurs wyzerowany, cel=%.1f°.",
+                             s_gyro_bias, spread, s_bias_n, s_heading_target_deg);
+                s_heading_deg = 0.0f;
+                enter(ST_CRUISE);
+            }
+            break;
+        }
 
         case ST_CRUISE:
             /* Wykrywanie linii jest zawsze "uzbrojone" - takze zaraz po
@@ -241,9 +419,17 @@ static void autonomy_task(void *arg) {
                 enter(ST_LINE_WAIT);
                 break;
             }
-            /* Jazda na wprost: stala moc (z dashboardu), bez impulsu rozruchowego. */
-            motor_set_left(s_speed_pct);
-            motor_set_right(s_speed_pct);
+            /* Krok 3: jazda z utrzymaniem zadanego kursu regulatorem P.
+             * turn>0 => skret w lewo (lewe kolo wolniej, prawe szybciej).
+             * motor_set_* przycina do [-100,100] we wlasnym zakresie. */
+            {
+                float turn = KP_HEADING * heading_err() + DRIVE_TRIM;
+                if (turn >  (float)TURN_MAX) turn =  (float)TURN_MAX;
+                if (turn < -(float)TURN_MAX) turn = -(float)TURN_MAX;
+                int td = (int)lroundf(turn);   /* zaokraglenie, nie obciecie - unika martwej strefy +/-1% */
+                motor_set_left (s_speed_pct - td);
+                motor_set_right(s_speed_pct + td);
+            }
             break;
 
         case ST_LINE_WAIT:
@@ -294,8 +480,9 @@ void autonomy_init(void) {
 
 void autonomy_set_enabled(bool enable) {
     if (enable) {
-        enter(ST_CRUISE);
         s_stopped = false;
+        /* Krok 2: najpierw ~1 s bezruchu na pomiar biasu gyro_z, potem jazda. */
+        start_gyro_cal();
         /* Nowy przejazd => nowy log (poprzedni, jesli nie pobrany, zostaje nadpisany). */
         s_log_n           = 0;
         s_log_full_warned = false;
@@ -304,7 +491,8 @@ void autonomy_set_enabled(bool enable) {
         s_run_energy_mwh  = 0.0f;
         s_log_t           = 0;          /* wymus natychmiastowy pierwszy rekord */
         s_enabled = true;
-        ESP_LOGI(TAG, "Autonomia WLACZONA - jazda na wprost; linia -> test mety Hallem, brak mety -> cofnij i jedz dalej (log wyzerowany).");
+        ESP_LOGI(TAG, "Autonomia WLACZONA - kalibracja zyra (%d ms bezruchu), potem jazda; log wyzerowany.",
+                 BIAS_CAL_MS);
     } else {
         /* Zamrazamy czas przejazdu tylko przy realnym przejsciu wl.->wyl.
          * (handler bywa wolany tez, gdy autonomia jest juz wylaczona -
@@ -321,16 +509,24 @@ bool autonomy_is_enabled(void) { return s_enabled; }
 
 const char *autonomy_state_str(void) { return state_name(s_state); }
 
-void autonomy_set_target_azimuth(float deg) {
-    /* Normalizacja do [0,360). Przechowywane, ale jazda go nie uzywa. */
-    while (deg >= 360.0f) deg -= 360.0f;
-    while (deg < 0.0f)    deg += 360.0f;
-    s_target_azimuth_deg = deg;
-    ESP_LOGI(TAG, "Zadany azymut start->meta ustawiony na %.1f st. (nieuzywany w wersji minimalnej).",
-             s_target_azimuth_deg);
+/* --- Krok 1/2: podglad estymatora kursu i sektorow LIDAR. --- */
+float autonomy_get_heading_deg(void)      { return s_heading_deg; }
+float autonomy_get_gyro_z_dps(void)       { return s_gyro_z_dps; }   /* surowy */
+float autonomy_get_gyro_z_filt_dps(void)  { return s_gyro_z_filt; }
+float autonomy_get_gyro_bias_dps(void)    { return s_gyro_bias; }
+float autonomy_get_heading_target_deg(void) { return s_heading_target_deg; }
+
+void autonomy_set_heading_target_deg(float deg) {
+    if (deg >  HEADING_TARGET_MAX) deg =  HEADING_TARGET_MAX;
+    if (deg < -HEADING_TARGET_MAX) deg = -HEADING_TARGET_MAX;
+    s_heading_target_deg = deg;
+    ESP_LOGI(TAG, "Zadany kurs (cel regulatora) = %.1f° (+ = w lewo).", deg);
 }
 
-float autonomy_get_target_azimuth(void) { return s_target_azimuth_deg; }
+void autonomy_get_lidar_sectors_mm(int16_t out[8]) {
+    for (int i = 0; i < SEC_COUNT; i++)
+        out[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
+}
 
 void autonomy_set_speed_pct(int pct) {
     if (pct < SPEED_PCT_MIN) pct = SPEED_PCT_MIN;

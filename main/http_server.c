@@ -186,11 +186,11 @@ static const char DASHBOARD_HTML[] =
     "    <span style=\"font-size:0.85em;color:#8b949e\">wierszy w logu: <span class=\"val\" id=\"auto-logcount\">0</span></span>\n"
     "  </div>\n"
     "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
-    "    <label>Azymut start&#8594;meta:</label>\n"
-    "    <input type=\"number\" id=\"auto-azimuth-in\" min=\"0\" max=\"359\" step=\"1\" value=\"0\" style=\"width:70px\">\n"
+    "    <label>Offset kursu (cel, + = w lewo):</label>\n"
+    "    <input type=\"number\" id=\"auto-heading-in\" min=\"-90\" max=\"90\" step=\"1\" value=\"18\" style=\"width:70px\">\n"
     "    <span>&#176;</span>\n"
-    "    <button onclick=\"setAzimuth()\">Zapisz</button>\n"
-    "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"auto-azimuth-cur\">-</span>&#176;</span>\n"
+    "    <button onclick=\"setHeading()\">Zapisz</button>\n"
+    "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"auto-heading-cur\">-</span>&#176; &#8212; do jazdy prosto ustaw 0</span>\n"
     "  </div>\n"
     "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
     "    <label>Pr&#281;dko&#347;&#263; jazdy (na wprost/do ty&#322;u):</label>\n"
@@ -198,6 +198,12 @@ static const char DASHBOARD_HTML[] =
     "    <span>%</span>\n"
     "    <button onclick=\"setSpeed()\">Zapisz</button>\n"
     "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiona: <span class=\"val\" id=\"auto-speed-cur\">-</span>%</span>\n"
+    "  </div>\n"
+    "  <div style=\"font-size:0.82em;color:#8b949e;margin-top:6px;font-family:monospace\">\n"
+    "    kurs: <span class=\"val\" id=\"auto-heading\">-</span>&#176; / cel <span class=\"val\" id=\"auto-htgt\">-</span>&#176; &nbsp; "
+    "gyro_z raw/filt: <span class=\"val\" id=\"auto-gyroz\">-</span>&#176;/s &nbsp; "
+    "bias: <span class=\"val\" id=\"auto-gbias\">-</span>&#176;/s &nbsp; "
+    "LIDAR P/PL/L/TL/T/TP/R/PP: <span class=\"val\" id=\"auto-sectors\">-</span> mm\n"
     "  </div>\n"
     "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost ustawion&#261; pr&#281;dko&#347;ci&#261;. Po wykryciu linii toru (czujniki odbiciowe ADC) staje na ~1,5 s i czeka na czujnik Halla &#8211; je&#347;li to meta, ko&#324;czy przejazd; je&#347;li nie, cofa si&#281; ~2 s i jedzie dalej. Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
     "</div>\n"
@@ -337,7 +343,11 @@ static const char DASHBOARD_HTML[] =
     "    }\n"
     "    if(d.autonomy){\n"
     "      updateAuto(d.autonomy.enabled,d.autonomy.state,d.autonomy.log_count);\n"
-    "      document.getElementById('auto-azimuth-cur').textContent=d.autonomy.target_azimuth_deg.toFixed(0);\n"
+    "      if(typeof d.autonomy.heading_target_deg!=='undefined'){\n"
+    "        document.getElementById('auto-heading-cur').textContent=d.autonomy.heading_target_deg.toFixed(0);\n"
+    "        var hi=document.getElementById('auto-heading-in');\n"
+    "        if(document.activeElement!==hi && !hi.dataset.touched){hi.value=d.autonomy.heading_target_deg.toFixed(0);}\n"
+    "      }\n"
     "      if(typeof d.autonomy.speed_pct!=='undefined'){\n"
     "        document.getElementById('auto-speed-cur').textContent=d.autonomy.speed_pct;\n"
     "        var spi=document.getElementById('auto-speed-in');\n"
@@ -345,6 +355,14 @@ static const char DASHBOARD_HTML[] =
     "      }\n"
     "      document.getElementById('od-time').textContent=d.autonomy.run_time_s.toFixed(1);\n"
     "      document.getElementById('od-energy').textContent=d.autonomy.run_energy_mwh.toFixed(1);\n"
+    "      if(typeof d.autonomy.heading_deg!=='undefined'){\n"
+    "        document.getElementById('auto-heading').textContent=d.autonomy.heading_deg.toFixed(1);\n"
+    "        if(typeof d.autonomy.heading_target_deg!=='undefined')document.getElementById('auto-htgt').textContent=d.autonomy.heading_target_deg.toFixed(1);\n"
+    "        document.getElementById('auto-gyroz').textContent=d.autonomy.gyro_z_dps.toFixed(1)+'/'+d.autonomy.gyro_z_filt_dps.toFixed(1);\n"
+    "        document.getElementById('auto-gbias').textContent=d.autonomy.gyro_bias_dps.toFixed(2);\n"
+    "        var sc=d.autonomy.lidar_sectors_mm||[];\n"
+    "        document.getElementById('auto-sectors').textContent=sc.join('/');\n"
+    "      }\n"
     "    }\n"
     "    if(d.line_test){\n"
     "      var lts=d.line_test.state;\n"
@@ -362,9 +380,17 @@ static const char DASHBOARD_HTML[] =
     "function buzzerStop(){fetch('/api/buzzer/stop',{method:'POST'});}\n"
     "function magCalStart(){fetch('/api/imu/mag_cal/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration_ms:15000})});}\n"
     "function magSetNorth(){fetch('/api/imu/mag_cal/set_north',{method:'POST'});}\n"
-    "function setAzimuth(){\n"
-    "  var v=parseFloat(document.getElementById('auto-azimuth-in').value)||0;\n"
-    "  fetch('/api/autonomy/azimuth',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({azimuth_deg:v})});\n"
+    "document.getElementById('auto-heading-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "function setHeading(){\n"
+    "  var v=parseFloat(document.getElementById('auto-heading-in').value);\n"
+    "  if(isNaN(v)){alert('Podaj offset kursu w stopniach');return;}\n"
+    "  fetch('/api/autonomy/heading',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({heading_deg:v})})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){if(d&&typeof d.heading_target_deg!=='undefined'){\n"
+    "      var hi=document.getElementById('auto-heading-in');delete hi.dataset.touched;\n"
+    "      hi.value=d.heading_target_deg;\n"
+    "      document.getElementById('auto-heading-cur').textContent=d.heading_target_deg.toFixed(0);\n"
+    "    }}).catch(function(){});\n"
     "}\n"
     "document.getElementById('auto-speed-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "function setSpeed(){\n"
@@ -605,10 +631,23 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(autoj, "enabled", autonomy_is_enabled());
     cJSON_AddStringToObject(autoj, "state", autonomy_state_str());
     cJSON_AddNumberToObject(autoj, "log_count", autonomy_log_count());
-    cJSON_AddNumberToObject(autoj, "target_azimuth_deg", (double)autonomy_get_target_azimuth());
     cJSON_AddNumberToObject(autoj, "speed_pct", autonomy_get_speed_pct());
     cJSON_AddNumberToObject(autoj, "run_time_s", (double)autonomy_get_run_time_s());
     cJSON_AddNumberToObject(autoj, "run_energy_mwh", (double)autonomy_get_run_energy_mwh());
+    /* Krok 1/2: podglad estymatora kursu i 8 sektorow LIDAR [mm]. */
+    cJSON_AddNumberToObject(autoj, "heading_deg",   (double)autonomy_get_heading_deg());
+    cJSON_AddNumberToObject(autoj, "gyro_z_dps",    (double)autonomy_get_gyro_z_dps());
+    cJSON_AddNumberToObject(autoj, "gyro_z_filt_dps", (double)autonomy_get_gyro_z_filt_dps());
+    cJSON_AddNumberToObject(autoj, "gyro_bias_dps", (double)autonomy_get_gyro_bias_dps());
+    cJSON_AddNumberToObject(autoj, "heading_target_deg", (double)autonomy_get_heading_target_deg());
+    {
+        int16_t secs[8];
+        autonomy_get_lidar_sectors_mm(secs);
+        cJSON *sarr = cJSON_CreateArray();
+        for (int i = 0; i < 8; i++)
+            cJSON_AddItemToArray(sarr, cJSON_CreateNumber(secs[i]));
+        cJSON_AddItemToObject(autoj, "lidar_sectors_mm", sarr);
+    }
     cJSON_AddItemToObject(root, "autonomy", autoj);
 
     /* Test wykrywania linii */
@@ -829,11 +868,14 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
 
     static const char *header =
         "czas_ms,stan,silnik_L_proc,silnik_R_proc,"
-        "lidar_przod_mm,lidar_diag_L_mm,lidar_diag_R_mm,lidar_bok_L_mm,lidar_bok_R_mm,"
-        "najwiecej_miejsca_st,temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
+        "gyro_x_dps,gyro_y_dps,gyro_z_dps,gyro_z_filt_dps,kurs_deg,"
+        "lidar_przod_mm,lidar_przodL_mm,lidar_lewo_mm,lidar_tylL_mm,"
+        "lidar_tyl_mm,lidar_tylP_mm,lidar_prawo_mm,lidar_przodP_mm,"
+        "linia_PL_mV,linia_TL_mV,linia_TP_mV,"
+        "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
     httpd_resp_send_chunk(req, header, strlen(header));
 
-    char buf[256];
+    char buf[384];
     uint32_t n = autonomy_log_count();
     for (uint32_t i = 0; i < n; i++) {
         autonomy_log_rec_t r;
@@ -841,11 +883,15 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         float obj = r.obj_temp_x10 / 10.0f;
         float amb = r.amb_temp_x10 / 10.0f;
         int len = snprintf(buf, sizeof(buf),
-            "%lu,%s,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
             (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
             r.motor_l, r.motor_r,
-            r.front_mm, r.diag_l_mm, r.diag_r_mm, r.side_l_mm, r.side_r_mm,
-            r.best_open_deg, obj, amb, obj - amb);
+            r.gyro_x_x10 / 10.0f, r.gyro_y_x10 / 10.0f, r.gyro_z_x10 / 10.0f,
+            r.gyro_zf_x10 / 10.0f, r.heading_x10 / 10.0f,
+            r.lidar_mm[0], r.lidar_mm[1], r.lidar_mm[2], r.lidar_mm[3],
+            r.lidar_mm[4], r.lidar_mm[5], r.lidar_mm[6], r.lidar_mm[7],
+            r.line_fl_mv, r.line_bl_mv, r.line_br_mv,
+            obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
     }
     httpd_resp_send_chunk(req, NULL, 0);   /* zakończ odpowiedź chunked */
@@ -883,9 +929,11 @@ static esp_err_t handle_autonomy(httpd_req_t *req) {
     return ESP_OK;
 }
 
-/* POST /api/autonomy/azimuth {"azimuth_deg":N} - zapisuje zgrubny azymut
- * start->meta, przechowywany do wykorzystania przez przyszłą nawigację. */
-static esp_err_t handle_autonomy_azimuth(httpd_req_t *req) {
+/* POST /api/autonomy/heading {"heading_deg":N} - Krok 4: ustawia zadany kurs
+ * (cel regulatora utrzymania kursu w ST_CRUISE) względem kierunku startowego.
+ * + = w lewo. Moduł autonomii przycina do ±90°. Odpowiada aktualną wartością
+ * (po przycięciu). Zastępuje dawne /api/autonomy/azimuth. */
+static esp_err_t handle_autonomy_heading(httpd_req_t *req) {
     if (req->content_len <= 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing body");
         return ESP_FAIL;
@@ -900,16 +948,22 @@ static esp_err_t handle_autonomy_azimuth(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
         return ESP_FAIL;
     }
-    cJSON *a = cJSON_GetObjectItem(j, "azimuth_deg");
+    cJSON *a = cJSON_GetObjectItem(j, "heading_deg");
     if (!cJSON_IsNumber(a)) {
         cJSON_Delete(j);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing azimuth_deg");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing heading_deg");
         return ESP_FAIL;
     }
-    autonomy_set_target_azimuth((float)a->valuedouble);
+    autonomy_set_heading_target_deg((float)a->valuedouble);
     cJSON_Delete(j);
 
-    httpd_resp_sendstr(req, "{\"ok\":true}");
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "heading_target_deg", (double)autonomy_get_heading_target_deg());
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, out);
+    free(out);
     return ESP_OK;
 }
 
@@ -1075,7 +1129,7 @@ esp_err_t http_server_start(void) {
         { .uri="/api/buzzer/song",    .method=HTTP_POST, .handler=handle_buzzer_song },
         { .uri="/api/buzzer/stop",    .method=HTTP_POST, .handler=handle_buzzer_stop },
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
-        { .uri="/api/autonomy/azimuth", .method=HTTP_POST, .handler=handle_autonomy_azimuth },
+        { .uri="/api/autonomy/heading", .method=HTTP_POST, .handler=handle_autonomy_heading },
         { .uri="/api/autonomy/speed",   .method=HTTP_POST, .handler=handle_autonomy_speed },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
         { .uri="/api/hall/threshold",   .method=HTTP_POST, .handler=handle_hall_threshold },

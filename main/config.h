@@ -36,7 +36,11 @@
 /* Progi detekcji linii dla czujników odbiciowych na ADC (osobno na kanał):
  * napięcie PONIŻEJ progu = linia wykryta. Wartości dobrane na docelowym
  * sprzęcie po napięciach pokazywanych na dashboardzie. */
-#define LINE_FL_THRESHOLD_V   1.0f   /* A1 — przód-lewy */
+/* Krok 1b: FL obniżony 1.0->0.6 - podłoga (biała płytka) czytała 1,1-1,3 V,
+ * a próg 1,0 V dawał zbyt mały margines; taśma ~0,24 V, więc 0,6 V ma zapas
+ * w obie strony. BL/BR mają dobre marginesy - bez zmian. Docelowy dobór na
+ * nawierzchni toru. */
+#define LINE_FL_THRESHOLD_V   0.6f   /* A1 — przód-lewy */
 #define LINE_BL_THRESHOLD_V   1.75f   /* A2 — tył-lewy   */
 #define LINE_BR_THRESHOLD_V   0.75f   /* A3 — tył-prawy  */
 
