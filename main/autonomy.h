@@ -98,7 +98,9 @@ float autonomy_get_run_energy_mwh(void);
  * która oś to yaw), scałkowany kurs względny (surowy), 8 sektorów LIDAR i
  * napięcia 3 czujników linii - komplet sygnałów decyzyjnych dla kolejnych
  * kroków. Stare pola LIDAR (front, diag L/R, side L/R, best_open_deg)
- * zastąpiono tablicą lidar_mm[8]. */
+ * zastąpiono tablicą lidar_mm[8]. Krok 5e: doszło napięcie i wykrycie Halla
+ * mety - wcześniej nie było ich w logu, co utrudniało weryfikację
+ * podejrzewanych fałszywych zadziałań. */
 typedef struct {
     uint32_t t_ms;          /* czas od startu przejazdu [ms] */
     uint8_t  state;         /* wartość enum stanu - patrz autonomy_log_state_name() */
@@ -108,11 +110,14 @@ typedef struct {
     int16_t  gyro_y_x10;    /* prędkość kątowa Y [°/s] * 10 */
     int16_t  gyro_z_x10;    /* prędkość kątowa Z (yaw) [°/s] * 10 - surowa */
     int16_t  gyro_zf_x10;   /* gyro_z po filtrze EMA [°/s] * 10 (Krok 2) */
+    int16_t  gyro_bias_x10; /* aktualny bias gyro_z [°/s] * 10 - zmienny w czasie (Krok 4b: powolna adaptacja) */
     int16_t  heading_x10;   /* scałkowany kurs względny [°] * 10, zawinięty (-180,180]; po odjęciu biasu (Krok 2) */
     int16_t  lidar_mm[8];   /* min. odległość w 8 sektorach [mm]; 0 = otwarte. Kolejność jak w SEC_* */
     int16_t  line_fl_mv;    /* czujnik linii przód-lewy [mV] */
     int16_t  line_bl_mv;    /* tył-lewy [mV] */
     int16_t  line_br_mv;    /* tył-prawy [mV] */
+    int16_t  hall_mv;       /* napięcie Halla mety (A0) [mV] - Krok 5e, do weryfikacji falszywych trafien */
+    uint8_t  hall_hit;      /* finish_detected w chwili próbki (0/1) - Krok 5e */
     int16_t  obj_temp_x10;  /* pirometr: temperatura obiektu [°C] * 10 */
     int16_t  amb_temp_x10;  /* pirometr: temperatura otoczenia [°C] * 10 */
 } autonomy_log_rec_t;

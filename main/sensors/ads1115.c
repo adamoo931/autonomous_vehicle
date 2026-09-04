@@ -32,6 +32,14 @@ static ads1115_data_t s_last = {0};
  * dashboardu przez ads1115_set_finish_threshold(). Domyślnie z config.h. */
 static float s_finish_threshold_v = HALL_FINISH_THRESHOLD_V;
 
+/* Napięcie spoczynkowe SS495A (bez magnesu w pobliżu) - punkt odniesienia
+ * dla wykrycia mety. Rzeczywiste napięcie spoczynkowe zmienia się między
+ * uruchomieniami ESP32 (obserwowane empirycznie: ~2,44-2,49 V), więc stała
+ * wartość z config.h (HALL_FINISH_REST_V) to tylko wartość startowa -
+ * kalibrowana w praktyce raz na przejazd przez autonomy.c (ST_GYRO_CAL,
+ * razem z bias żyra) przez ads1115_set_finish_rest_v(). */
+static float s_finish_rest_v = HALL_FINISH_REST_V;
+
 /* Zapis rejestru 16-bitowego w kolejności big-endian (jak INA219). */
 static esp_err_t ads_write16(uint8_t reg, uint16_t val) {
     uint8_t data[3] = { reg, (uint8_t)(val >> 8), (uint8_t)(val & 0xFF) };
@@ -110,7 +118,7 @@ esp_err_t ads1115_read(ads1115_data_t *out) {
     if (ads_measure(ADS1115_CONFIG_AIN0, &v) != ESP_OK) return ESP_FAIL;
     s_last.voltage_v = v;
     s_last.finish_detected =
-        fabsf(s_last.voltage_v - HALL_FINISH_REST_V) >= s_finish_threshold_v;
+        fabsf(s_last.voltage_v - s_finish_rest_v) >= s_finish_threshold_v;
 
     /* A1..A3 - czujniki odbiciowe linii (best-effort: pojedynczy błąd
      * zostawia poprzednią wartość, nie przerywa całego odczytu). */
@@ -131,7 +139,22 @@ void ads1115_set_finish_threshold(float volts) {
     if (volts > ADS1115_FSR_V) volts = ADS1115_FSR_V;
     s_finish_threshold_v = volts;
     ESP_LOGI(TAG, "Prog detekcji mety (Hall) ustawiony na +-%.3f V wzgledem %.3f V",
-             (double)volts, (double)HALL_FINISH_REST_V);
+             (double)volts, (double)s_finish_rest_v);
 }
 
 float ads1115_get_finish_threshold(void) { return s_finish_threshold_v; }
+
+void ads1115_set_finish_rest_v(float volts) {
+    /* Przycinamy do sensownego zakresu wokol wartosci domyslnej z config.h -
+     * ochrona przed razacym bledem kalibracji (np. gdyby przypadkiem
+     * kalibrowano z magnesem w poblizu). */
+    float lo = HALL_FINISH_REST_V - 0.5f;
+    float hi = HALL_FINISH_REST_V + 0.5f;
+    if (volts < lo) volts = lo;
+    if (volts > hi) volts = hi;
+    s_finish_rest_v = volts;
+    ESP_LOGI(TAG, "Napiecie spoczynkowe Halla (mety) ustawione na %.3f V (bylo domyslnie %.3f V)",
+             (double)volts, (double)HALL_FINISH_REST_V);
+}
+
+float ads1115_get_finish_rest_v(void) { return s_finish_rest_v; }

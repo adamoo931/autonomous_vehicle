@@ -113,6 +113,7 @@ static const char DASHBOARD_HTML[] =
     "      <button onclick=\"setHallThreshold()\">Zapisz</button>\n"
     "    </div>\n"
     "    <div style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"hl-thr-cur\">-</span> V (odchy&#322;ka od spoczynku)</div>\n"
+    "    <div style=\"font-size:0.85em;color:#8b949e\">spoczynek (auto-kalibracja Kroku 5c): <span class=\"val\" id=\"hl-rest-cur\">-</span> V</div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#128207; Odometria</h2>\n"
@@ -322,6 +323,9 @@ static const char DASHBOARD_HTML[] =
     "        document.getElementById('hl-thr-cur').textContent=d.hall.finish_threshold_v.toFixed(3);\n"
     "        var hti=document.getElementById('hl-thr-in');\n"
     "        if(document.activeElement!==hti && !hti.dataset.touched){hti.value=d.hall.finish_threshold_v.toFixed(3);}\n"
+    "      }\n"
+    "      if(typeof d.hall.finish_rest_v!=='undefined'){\n"
+    "        document.getElementById('hl-rest-cur').textContent=d.hall.finish_rest_v.toFixed(3);\n"
     "      }\n"
     "    }\n"
     "    if(d.line_sensors){\n"
@@ -603,6 +607,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(hallj, "voltage_v",          (double)hall.voltage_v);
     cJSON_AddBoolToObject(hallj,   "finish_detected",    hall.finish_detected);
     cJSON_AddNumberToObject(hallj, "finish_threshold_v", (double)ads1115_get_finish_threshold());
+    cJSON_AddNumberToObject(hallj, "finish_rest_v",      (double)ads1115_get_finish_rest_v());
     cJSON_AddNumberToObject(hallj, "address",            hall.address);
     cJSON_AddBoolToObject(hallj,   "initialized",        hall.initialized);
     cJSON_AddItemToObject(root, "hall", hallj);
@@ -868,10 +873,10 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
 
     static const char *header =
         "czas_ms,stan,silnik_L_proc,silnik_R_proc,"
-        "gyro_x_dps,gyro_y_dps,gyro_z_dps,gyro_z_filt_dps,kurs_deg,"
+        "gyro_x_dps,gyro_y_dps,gyro_z_dps,gyro_z_filt_dps,gyro_bias_dps,kurs_deg,"
         "lidar_przod_mm,lidar_przodL_mm,lidar_lewo_mm,lidar_tylL_mm,"
         "lidar_tyl_mm,lidar_tylP_mm,lidar_prawo_mm,lidar_przodP_mm,"
-        "linia_PL_mV,linia_TL_mV,linia_TP_mV,"
+        "linia_PL_mV,linia_TL_mV,linia_TP_mV,hall_mV,hall_wykryto,"
         "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
     httpd_resp_send_chunk(req, header, strlen(header));
 
@@ -883,14 +888,14 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         float obj = r.obj_temp_x10 / 10.0f;
         float amb = r.amb_temp_x10 / 10.0f;
         int len = snprintf(buf, sizeof(buf),
-            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
             (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
             r.motor_l, r.motor_r,
             r.gyro_x_x10 / 10.0f, r.gyro_y_x10 / 10.0f, r.gyro_z_x10 / 10.0f,
-            r.gyro_zf_x10 / 10.0f, r.heading_x10 / 10.0f,
+            r.gyro_zf_x10 / 10.0f, r.gyro_bias_x10 / 10.0f, r.heading_x10 / 10.0f,
             r.lidar_mm[0], r.lidar_mm[1], r.lidar_mm[2], r.lidar_mm[3],
             r.lidar_mm[4], r.lidar_mm[5], r.lidar_mm[6], r.lidar_mm[7],
-            r.line_fl_mv, r.line_bl_mv, r.line_br_mv,
+            r.line_fl_mv, r.line_bl_mv, r.line_br_mv, r.hall_mv, r.hall_hit,
             obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
     }

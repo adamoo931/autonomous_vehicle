@@ -48,8 +48,19 @@ esp_err_t ads1115_read(ads1115_data_t *out);
 ads1115_data_t ads1115_get_last(void);
 
 /* Ustawia/odczytuje próg detekcji mety - maksymalną dopuszczalną odchyłkę
- * napięcia SS495A od wartości spoczynkowej (HALL_FINISH_REST_V), przy której
- * meldowana jest meta. Wartość w woltach, ograniczana do sensownego zakresu.
- * Nie jest zapisywana w NVS - po restarcie wraca HALL_FINISH_THRESHOLD_V. */
+ * napięcia SS495A od wartości spoczynkowej (ads1115_get_finish_rest_v()),
+ * przy której meldowana jest meta. Wartość w woltach, ograniczana do
+ * sensownego zakresu. Nie jest zapisywana w NVS - po restarcie wraca
+ * HALL_FINISH_THRESHOLD_V. */
 void  ads1115_set_finish_threshold(float volts);
 float ads1115_get_finish_threshold(void);
+
+/* Ustawia/odczytuje napięcie spoczynkowe SS495A (bez magnesu w pobliżu) -
+ * punkt odniesienia dla wykrycia mety. Rzeczywiste napięcie spoczynkowe
+ * różni się między uruchomieniami ESP32 (obserwowane: ~2,44-2,49 V), więc
+ * stała HALL_FINISH_REST_V w config.h to tylko wartość startowa po boocie -
+ * kalibrowana w praktyce raz na przejazd przez autonomy.c (razem z bias
+ * żyroskopu, na początku przejazdu, gdy pojazd stoi z dala od magnesu mety).
+ * Przycinana do ±0,5 V wokół HALL_FINISH_REST_V. Nie zapisywana w NVS. */
+void  ads1115_set_finish_rest_v(float volts);
+float ads1115_get_finish_rest_v(void);

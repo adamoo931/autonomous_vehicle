@@ -163,4 +163,4 @@
  *  docelowym sprzęcie, jeśli napięcie spoczynkowe się zmieni (np. inny
  *  egzemplarz czujnika/zasilanie). */
 #define HALL_FINISH_REST_V        2.488f  /* napięcie spoczynkowe SS495A bez magnesu [V] */
-#define HALL_FINISH_THRESHOLD_V   0.040f  /* domyślny próg: |napięcie - spoczynek| >= tego = meta [V] */
+#define HALL_FINISH_THRESHOLD_V   0.050f  /* domyślny próg: |napięcie - spoczynek| >= tego = meta [V] */

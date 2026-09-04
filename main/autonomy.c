@@ -70,6 +70,36 @@ static const char *TAG = "AUTO";
 #define LINE_BACKUP_MS          2000  /* czas cofania, gdy linia to nie meta */
 #define LINE_POSTBACKUP_PAUSE_MS 500  /* postoj po cofnieciu, zanim pojazd znow ruszy */
 
+/* Linia startowa jest tez oznaczona tasma odblaciowa, przez ktora pojazd
+ * musi przejechac na wprost zaraz po starcie - bez tego pierwszy krok
+ * ST_CRUISE natychmiast "wykrywalby linie" na wlasnej linii startowej.
+ * Przez ten czas PO ZAKONCZENIU KALIBRACJI zyra (jednorazowo, tylko na
+ * poczatku przejazdu - patrz s_run_cruise_start_ms) czujniki linii sa
+ * ignorowane. Czasowe, nie dystansowe, bo odometria jest zepsuta. */
+#define START_LINE_IGNORE_MS    3000
+
+/* Krok 5b: strona krawedzi wywnioskowana z tego, KTORY czujnik linii
+ * zareagowal jako pierwszy. Zwalidowane logiem (przejazdwzdluzlinii.csv):
+ * przy realnej krawedzi po PRAWEJ stronie robota, we WSZYSTKICH kontaktach
+ * zglosil sie WYLACZNIE tyl-prawy (bez przod-lewy/tyl-lewy). Kombinacje z
+ * udzialem przod-lewy (jedyny dzialajacy czujnik z przodu) sa geometrycznie
+ * niejednoznaczne - traktowane jako nieznane, bez korekty kierunku. */
+typedef enum { EDGE_SIDE_UNKNOWN, EDGE_SIDE_LEFT, EDGE_SIDE_RIGHT } edge_side_t;
+
+#define EDGE_TURN_AWAY_DEG      20.0f  /* dodatkowe "wycelowanie" kursu od strony
+                                         * trafionej krawedzi po odbiciu (patrz Krok 5b) */
+
+/* Krok 5d: debounce detekcji linii i Halla - N kolejnych taktow petli (20 Hz)
+ * z warunkiem prawdziwym, zanim uznamy go za realny. Zdiagnozowane logiem
+ * (przejazdwzdluz2.csv): przy braku debounce pojedynczy skok ADC na kanale
+ * linii (cala magistrala ADS1115 dzieli te sama podatnosc na zaklocenia
+ * silnikow co zyroskop) potrafil na jeden takt (50 ms) uzbroic okno kontaktu
+ * z Hallem bez realnego najechania na tasme - niewidoczne w logu CSV (probki
+ * co 300 ms), ale spojne z obserwowanym "fake" zdarzeniem. 3 takty = ~150 ms,
+ * znikome wzgledem realnego kontaktu trwajacego sekundy. */
+#define LINE_DEBOUNCE_COUNT     3
+#define HALL_DEBOUNCE_COUNT     3
+
 /* Okresy petli sterowania i logowania. */
 #define LOOP_MS          50      /* 20 Hz - petla sterowania */
 #define STATUS_LOG_MS   300      /* ~3,3 Hz - log konsoli + rekord CSV */
@@ -82,8 +112,26 @@ static const char *TAG = "AUTO";
 #define BIAS_CAL_MS           1000   /* czas usredniania biasu na starcie [ms] */
 #define BIAS_CAL_MAX_SPREAD    4.0f  /* max-min gyro_z podczas kal. [°/s]; wiecej => ostrzezenie */
 #define HEADING_SIGN         (+1.0f) /* odwroc na -1, jesli kierunek kursu wyjdzie odwrotny */
-#define HEADING_LPF_ALPHA      0.30f /* EMA na predkosc katowa przed calkowaniem */
+#define HEADING_LPF_ALPHA      0.20f /* EMA na predkosc katowa przed calkowaniem (Krok 4b: 0.30 -> 0.20,
+                                       * mocniejsze tlumienie szumu - patrz dryf na dlugich przejazdach) */
 #define HEADING_DT_MAX_S       0.30f /* dluzsza przerwa w petli => pomijamy calkowanie (unik skoku) */
+
+/* --- Krok 4b: powolna adaptacja biasu zyra podczas USTALONEJ jazdy prostej.
+ * Diagnoza z dlugich przejazdow (>30 s bez kontaktu z tasma): kurs_deg
+ * trzyma cel poprawnie w logu, ale fizyczny pojazd i tak znosi w prawo -
+ * bo regulator zeruje blad w SAMYM ESTYMATORZE, ktory ma rezydualny,
+ * wolno zmienny bias nieuchwycony przez jednorazowa kalibracje na starcie
+ * (dryf termiczny/wibracyjny obecny tylko w ruchu). Gdy blad kursu jest
+ * maly ORAZ filtrowana predkosc katowa jest mala (ustalona jazda prosto,
+ * nie manewr/popchniecie) - prawdziwa predkosc obrotowa POWINNA byc ~0;
+ * jesli zyro czyta co innego, to bias - powoli dociagamy s_gyro_bias w
+ * jego strone (stala czasowa ~25 s przy 20 Hz, nie zjada prawdziwych
+ * korekt). To nie zastepuje Kroku 5 (re-zerowanie na kontakcie z krawedzia
+ * - jedyne prawdziwe, bezdryfowe odniesienie) - tylko spowalnia dryf
+ * miedzy kontaktami. */
+#define BIAS_ADAPT_ERR_MAX      3.0f   /* [°] max |blad kursu| by uznac za ustalona jazde */
+#define BIAS_ADAPT_RATE_MAX_DPS 3.0f   /* [°/s] max |gyro_z_filt| by uznac za ustalona jazde (nie manewr) */
+#define BIAS_ADAPT_RATE         0.002f /* wspolczynnik adaptacji biasu na takt petli (20 Hz) */
 
 /* --- Krok 3: utrzymanie kursu (regulator P) w ST_CRUISE ---
  * turn = KP_HEADING * blad_kursu + DRIVE_TRIM, ograniczone do +/-TURN_MAX;
@@ -102,9 +150,10 @@ static const char *TAG = "AUTO";
 #define HEADING_TARGET_DEFAULT   18.0f
 #define HEADING_TARGET_MAX       90.0f  /* zakres przycinania [+/-°] */
 
-/* Bufor logu przejazdu (RAM, do pobrania jako CSV). Rekord ~44 B;
- * 1100 * 44 ~= 48 KB - tyle samo co poprzedni dzialajacy bufor (2000 * 24 B),
- * wiec bez wzrostu zajetosci .bss. Przy 300 ms daje ok. 5,5 min nagrywania. */
+/* Bufor logu przejazdu (RAM, do pobrania jako CSV). Rekord ~48 B (Krok 5e:
+ * +napiecie/wykrycie Halla); 1100 * 48 ~= 53 KB - wciaz w granicach zapasu
+ * sterty zmierzonego przy Kroku 1 (~62 KB wolne w segmencie DRAM). Przy
+ * 300 ms daje ok. 5,5 min nagrywania. */
 #define AUTO_LOG_MAX   1100
 
 /* --- Krok 1: sektory LIDAR do telemetrii ---
@@ -151,6 +200,13 @@ static uint32_t s_log_t   = 0;   /* ms ostatniego szczegolowego logu */
  * (Krok 3/4). + = w lewo. Ustawiany z dashboardu (autonomy_set_heading_target_deg). */
 static volatile float s_heading_target_deg = HEADING_TARGET_DEFAULT;
 
+/* Krok 5b: strona krawedzi ostatniego kontaktu z tasma (patrz classify_edge_side). */
+static edge_side_t s_line_hit_side = EDGE_SIDE_UNKNOWN;
+
+/* Krok 5d: liczniki debounce (patrz LINE_DEBOUNCE_COUNT/HALL_DEBOUNCE_COUNT). */
+static int s_line_debounce = 0;
+static int s_hall_debounce = 0;
+
 /* Moc silnikow [%] przy jezdzie na wprost/do tylu - ustawiana z
  * dashboardu (patrz autonomy_set_speed_pct()). */
 static volatile int s_speed_pct = SPEED_PCT_DEFAULT;
@@ -171,6 +227,15 @@ static float    s_bias_sum = 0.0f;
 static int      s_bias_n   = 0;
 static float    s_bias_min = 0.0f;
 static float    s_bias_max = 0.0f;
+
+/* Akumulator kalibracji napiecia spoczynkowego Halla (ST_GYRO_CAL, razem
+ * z biasem zyra - patrz ads1115_set_finish_rest_v()). */
+static float    s_hall_sum = 0.0f;
+
+/* Chwila zakonczenia kalibracji zyra (pierwsze wejscie w ST_CRUISE w danym
+ * przejezdzie) - punkt odniesienia dla START_LINE_IGNORE_MS. Ustawiane raz
+ * na przejazd, NIE przy kazdym powrocie do ST_CRUISE po odbiciu. */
+static uint32_t s_run_cruise_start_ms = 0;
 
 /* Log przejazdu w RAM (eksportowany jako CSV). */
 static autonomy_log_rec_t s_log[AUTO_LOG_MAX];
@@ -221,6 +286,7 @@ static inline void stop_run(void) { s_run_elapsed_ms = now_ms() - s_run_t0; }
 typedef struct {
     imu_data_t         imu;
     line_sensor_data_t line;
+    ads1115_data_t      hall;      /* Krok 5e: A0 (Hall mety) + finish_detected */
     int16_t            sec_mm[SEC_COUNT];
     float              heading_deg;
     float              gyro_z_filt;
@@ -230,6 +296,7 @@ static telem_t telem_snapshot(void) {
     telem_t t;
     t.imu  = imu_get_last();
     t.line = line_sensor_read();
+    t.hall = ads1115_get_last();
     for (int i = 0; i < SEC_COUNT; i++)
         t.sec_mm[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
     t.heading_deg = s_heading_deg;
@@ -256,11 +323,14 @@ static void record_sample(uint32_t now, pyrometer_data_t pd, const telem_t *tl) 
     r->gyro_y_x10   = (int16_t)(tl->imu.gyro_y * 10.0f);
     r->gyro_z_x10   = (int16_t)(tl->imu.gyro_z * 10.0f);
     r->gyro_zf_x10  = (int16_t)(tl->gyro_z_filt * 10.0f);
+    r->gyro_bias_x10 = (int16_t)(s_gyro_bias * 10.0f);
     r->heading_x10  = (int16_t)(tl->heading_deg * 10.0f);
     for (int i = 0; i < SEC_COUNT; i++) r->lidar_mm[i] = tl->sec_mm[i];
     r->line_fl_mv   = (int16_t)(tl->line.front_left_v * 1000.0f);
     r->line_bl_mv   = (int16_t)(tl->line.back_left_v  * 1000.0f);
     r->line_br_mv   = (int16_t)(tl->line.back_right_v * 1000.0f);
+    r->hall_mv      = (int16_t)(tl->hall.voltage_v * 1000.0f);
+    r->hall_hit     = tl->hall.finish_detected ? 1 : 0;
     r->obj_temp_x10 = (int16_t)(pd.object_temp  * 10.0f);
     r->amb_temp_x10 = (int16_t)(pd.ambient_temp * 10.0f);
 }
@@ -276,14 +346,35 @@ static inline bool track_line_detected(void) {
     return d.front_left || d.back_left || d.back_right;
 }
 
-/* Krok 2: rozpoczyna kalibracje biasu gyro_z - zeruje akumulatory i kurs,
- * wchodzi w ST_GYRO_CAL (silniki stoja, patrz obsluga stanu). */
+/* Krok 5b: patrz definicja EDGE_TURN_AWAY_DEG - klasyfikacja strony
+ * krawedzi z wzorca czujnikow linii, ktore zareagowaly. */
+static edge_side_t classify_edge_side(line_sensor_data_t d) {
+    if (d.back_right && !d.back_left && !d.front_left) return EDGE_SIDE_RIGHT;
+    if (d.back_left  && !d.back_right && !d.front_left) return EDGE_SIDE_LEFT;
+    return EDGE_SIDE_UNKNOWN;
+}
+
+static const char *edge_side_name(edge_side_t s) {
+    switch (s) {
+        case EDGE_SIDE_LEFT:  return "lewa";
+        case EDGE_SIDE_RIGHT: return "prawa";
+        default:              return "nieznana";
+    }
+}
+
+/* Krok 2/5c: rozpoczyna kalibracje biasu gyro_z i napiecia spoczynkowego
+ * Halla - zeruje akumulatory i kurs, wchodzi w ST_GYRO_CAL (silniki stoja,
+ * patrz obsluga stanu). */
 static void start_gyro_cal(void) {
-    s_bias_sum    = 0.0f;
-    s_bias_n      = 0;
-    s_bias_min    =  1e9f;
-    s_bias_max    = -1e9f;
-    s_heading_deg = 0.0f;
+    s_bias_sum      = 0.0f;
+    s_bias_n        = 0;
+    s_bias_min      =  1e9f;
+    s_bias_max      = -1e9f;
+    s_hall_sum      = 0.0f;
+    s_heading_deg   = 0.0f;
+    s_line_hit_side = EDGE_SIDE_UNKNOWN;
+    s_line_debounce = 0;
+    s_hall_debounce = 0;
     enter(ST_GYRO_CAL);
 }
 
@@ -352,7 +443,7 @@ static void autonomy_task(void *arg) {
             ESP_LOGI(TAG,
                 "[%s] L=%d%% R=%d%% | kurs=%.1f cel=%.1f err=%.1f | gyroZ raw/filt=%.1f/%.1f bias=%.2f /s | "
                 "LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
-                "linia PL/TL/TP=%d/%d/%d mV",
+                "linia PL/TL/TP=%d/%d/%d mV | Hall=%.3fV wykryto=%d",
                 state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
                 tl.heading_deg, s_heading_target_deg, heading_err(),
                 tl.imu.gyro_z, tl.gyro_z_filt, s_gyro_bias,
@@ -360,16 +451,30 @@ static void autonomy_task(void *arg) {
                 tl.sec_mm[SEC_REAR_L], tl.sec_mm[SEC_REAR], tl.sec_mm[SEC_REAR_R],
                 tl.sec_mm[SEC_RIGHT], tl.sec_mm[SEC_FRONT_R],
                 (int)(tl.line.front_left_v * 1000.0f), (int)(tl.line.back_left_v * 1000.0f),
-                (int)(tl.line.back_right_v * 1000.0f));
+                (int)(tl.line.back_right_v * 1000.0f),
+                tl.hall.voltage_v, (int)tl.hall.finish_detected);
             record_sample(now, pd, &tl);
         }
 
-        /* Meta (Hall) ma bezwzgledny priorytet - potwierdza mete
-         * niezaleznie od tego, czy pojazd jedzie, czeka na linii, czy sie
-         * cofa. Magnes lezy pod ta sama tasma co granica toru, wiec
-         * dopiero Hall odroznia mete od zwyklego przeciecia tasmy. */
-        if (s_state != ST_STOP_FINISH && ads1115_get_last().finish_detected) {
-            finish_run(ST_STOP_FINISH, "Meta potwierdzona czujnikiem Halla");
+        /* Krok 5c: Hall sprawdzany TYLKO w oknie tuz po kontakcie z tasma
+         * (ST_LINE_WAIT/ST_LINE_BACKUP/ST_LINE_PAUSE), NIE w trakcie zwyklej
+         * jazdy (ST_CRUISE). Magnes lezy pod ta sama tasma co granica toru -
+         * bez kontaktu z tasma nie ma fizycznej mozliwosci, by Hall widzial
+         * prawdziwa mete, wiec "finish_detected" poza tym oknem to niemal na
+         * pewno szum (przy progu 0,05 V zdarzaja sie falszywe zadzialania w
+         * trakcie zwyklej jazdy - podniesienie progu z kolei gubilo
+         * prawdziwa mete). Bramkowanie oknem kontaktu odcina te falszywe
+         * trafienia bez ruszania progu. */
+        bool hall_window = (s_state == ST_LINE_WAIT || s_state == ST_LINE_BACKUP || s_state == ST_LINE_PAUSE);
+        if (hall_window && ads1115_get_last().finish_detected) {
+            /* Krok 5d: debounce - patrz HALL_DEBOUNCE_COUNT. */
+            s_hall_debounce++;
+        } else {
+            s_hall_debounce = 0;
+        }
+        if (s_hall_debounce >= HALL_DEBOUNCE_COUNT) {
+            s_hall_debounce = 0;
+            finish_run(ST_STOP_FINISH, "Meta potwierdzona czujnikiem Halla (okno kontaktu z tasma)");
             vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
             continue;
         }
@@ -383,13 +488,14 @@ static void autonomy_task(void *arg) {
             break;
 
         case ST_GYRO_CAL: {
-            /* Bezruch - usredniaj gyro_z. Silniki stoja. */
+            /* Bezruch - usredniaj gyro_z i napiecie Halla. Silniki stoja. */
             motor_stop();
             imu_data_t im = imu_get_last();
             s_bias_sum += im.gyro_z;
             s_bias_n++;
             if (im.gyro_z < s_bias_min) s_bias_min = im.gyro_z;
             if (im.gyro_z > s_bias_max) s_bias_max = im.gyro_z;
+            s_hall_sum += ads1115_get_last().voltage_v;
             if (now - s_state_t >= BIAS_CAL_MS) {
                 s_gyro_bias = (s_bias_n > 0) ? (s_bias_sum / (float)s_bias_n) : 0.0f;
                 float spread = s_bias_max - s_bias_min;
@@ -400,7 +506,19 @@ static void autonomy_task(void *arg) {
                     ESP_LOGI(TAG, "Kalibracja zyra OK: bias gyro_z = %.2f °/s "
                                   "(rozrzut %.1f, %d probek). Kurs wyzerowany, cel=%.1f°.",
                              s_gyro_bias, spread, s_bias_n, s_heading_target_deg);
+
+                /* Krok 5c: kalibracja napiecia spoczynkowego Halla - patrz
+                 * komentarz przy ads1115_set_finish_rest_v(). Robot na starcie
+                 * jest z dala od magnesu mety, wiec to bezpieczny moment na
+                 * pomiar. Przycinanie do sensownego zakresu jest juz w
+                 * ads1115_set_finish_rest_v(). */
+                if (s_bias_n > 0) {
+                    float hall_rest = s_hall_sum / (float)s_bias_n;
+                    ads1115_set_finish_rest_v(hall_rest);
+                }
+
                 s_heading_deg = 0.0f;
+                s_run_cruise_start_ms = now;   /* start okna ignorowania tasmy na linii startowej */
                 enter(ST_CRUISE);
             }
             break;
@@ -411,19 +529,46 @@ static void autonomy_task(void *arg) {
              * cofnieciu i ponownym najechaniu na te sama tasme. Robione
              * celowo: to ma sluzyc do powtarzalnego sprawdzania odczytow
              * czujnikow odbiciowych (stop -> test Halla -> cofniecie ->
-             * ponowny stop na tej samej linii), nie do omijania jej. */
-            if (track_line_detected()) {
-                ESP_LOGI(TAG, "Linia wykryta - stop, czekam %d ms na potwierdzenie mety (Hall).",
-                         LINE_WAIT_MS);
-                motor_stop();
-                enter(ST_LINE_WAIT);
-                break;
+             * ponowny stop na tej samej linii), nie do omijania jej.
+             * Wyjatek: pierwsze START_LINE_IGNORE_MS po kalibracji zyra
+             * (jednorazowo na starcie przejazdu) - pojazd musi przejechac
+             * prosto przez tasme na samej linii startowej, wiec czujniki
+             * linii sa w tym oknie ignorowane. */
+            {
+                bool past_start_window = (now - s_run_cruise_start_ms >= START_LINE_IGNORE_MS);
+                /* Krok 5d: debounce - patrz LINE_DEBOUNCE_COUNT. */
+                if (past_start_window && track_line_detected()) {
+                    s_line_debounce++;
+                } else {
+                    s_line_debounce = 0;
+                }
+                if (s_line_debounce >= LINE_DEBOUNCE_COUNT) {
+                    s_line_debounce = 0;
+                    /* Krok 5b: zapamietaj, ktory czujnik zareagowal - uzyte przy
+                     * powrocie do jazdy (ST_LINE_PAUSE), zeby skrecic OD trafionej
+                     * krawedzi zamiast slepo wracac na ten sam kurs. */
+                    s_line_hit_side = classify_edge_side(line_sensor_read());
+                    ESP_LOGI(TAG, "Linia wykryta (strona=%s) - stop, czekam %d ms na potwierdzenie mety (Hall).",
+                             edge_side_name(s_line_hit_side), LINE_WAIT_MS);
+                    motor_stop();
+                    enter(ST_LINE_WAIT);
+                    break;
+                }
             }
             /* Krok 3: jazda z utrzymaniem zadanego kursu regulatorem P.
              * turn>0 => skret w lewo (lewe kolo wolniej, prawe szybciej).
              * motor_set_* przycina do [-100,100] we wlasnym zakresie. */
             {
-                float turn = KP_HEADING * heading_err() + DRIVE_TRIM;
+                float err = heading_err();
+
+                /* Krok 4b: adaptacja biasu - tylko w ustalonej jezdzie prostej
+                 * (maly blad kursu I mala filtrowana predkosc katowa), zeby
+                 * nie mylic prawdziwych korekt/manewrow z rezydualnym biasem. */
+                if (fabsf(err) < BIAS_ADAPT_ERR_MAX && fabsf(s_gyro_z_filt) < BIAS_ADAPT_RATE_MAX_DPS) {
+                    s_gyro_bias += BIAS_ADAPT_RATE * (s_gyro_z_filt - s_gyro_bias);
+                }
+
+                float turn = KP_HEADING * err + DRIVE_TRIM;
                 if (turn >  (float)TURN_MAX) turn =  (float)TURN_MAX;
                 if (turn < -(float)TURN_MAX) turn = -(float)TURN_MAX;
                 int td = (int)lroundf(turn);   /* zaokraglenie, nie obciecie - unika martwej strefy +/-1% */
@@ -457,7 +602,38 @@ static void autonomy_task(void *arg) {
             /* Krotki postoj po cofnieciu, zanim pojazd znow ruszy na wprost. */
             motor_stop();
             if (now - s_state_t >= LINE_POSTBACKUP_PAUSE_MS) {
-                ESP_LOGI(TAG, "Postoj po cofnieciu zakonczony - jade dalej na wprost.");
+                /* Krok 5a: re-zerowanie estymatora kursu do zadanej wartosci.
+                 * Diagnoza z dlugich przejazdow (dwa pozornie identyczne
+                 * przejazdy przy tym samym celu - jeden dojechal do mety,
+                 * drugi zniosl w prawo i nie dojechal, mimo ze kurs_deg w obu
+                 * logach wygladal podobnie): regulator zeruje blad w SAMYM
+                 * estymatorze, ale bledy poprzecznego polozenia (calka bledu
+                 * kursu po drodze) nie sa w ogole widoczne w kurs_deg i moga
+                 * sie kumulowac miedzy kontaktami z tasma bez ograniczenia.
+                 * Kontakt z tasma + cofniecie to jedyny dostepny nam moment
+                 * "resetu" - zakladamy, ze pojazd jest z powrotem mniej wiecej
+                 * na kursie i czyscimy nagromadzony blad estymatora.
+                 *
+                 * Krok 5b: dodatkowo, jesli strona kontaktu byla jednoznaczna
+                 * (patrz classify_edge_side - zwalidowane logiem
+                 * przejazdwzdluzlinii.csv), estymator jest re-zerowany NIE
+                 * dokladnie do celu, tylko z odchyleniem "od" trafionej
+                 * krawedzi. Regulator P widzi to jako chwilowy blad kursu i
+                 * sam wykona skret od krawedzi, po czym w naturalny sposob
+                 * wroci do prawdziwego celu w miare jak estymator dogoni
+                 * rzeczywistosc - bez zadnej dodatkowej logiki sterowania.
+                 * Bez tego pojazd wracal w te sama krawedz po ~1,5-2 s (patrz
+                 * log: 3 odbicia pod rzad w ciagu 15 s przy krawedzi po
+                 * prawej). Gdy strona nieznana (np. sam przod-lewy) - bez
+                 * odchylenia, jak w Kroku 5a. */
+                float edge_bias = 0.0f;
+                if      (s_line_hit_side == EDGE_SIDE_RIGHT) edge_bias = -EDGE_TURN_AWAY_DEG; /* estymator "za nisko" -> regulator skreca w lewo, od prawej krawedzi */
+                else if (s_line_hit_side == EDGE_SIDE_LEFT)  edge_bias =  EDGE_TURN_AWAY_DEG; /* odwrotnie - skret w prawo, od lewej krawedzi */
+                ESP_LOGI(TAG, "Postoj po cofnieciu zakonczony - re-zeruje kurs do celu (%.1f°, bylo %.1f°), "
+                              "strona=%s, odchylenie=%.0f° - jade dalej.",
+                         s_heading_target_deg, s_heading_deg, edge_side_name(s_line_hit_side), edge_bias);
+                s_heading_deg   = s_heading_target_deg + edge_bias;
+                s_line_hit_side = EDGE_SIDE_UNKNOWN;
                 enter(ST_CRUISE);
             }
             break;
