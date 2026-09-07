@@ -83,6 +83,15 @@ int  autonomy_get_front_stop_mm(void);
 void autonomy_set_front_stop_mm(int mm);
 int  autonomy_get_corridor_mm(void);
 
+/* --- Krok 7: parametry omijania przeszkody (follow-the-gap), nastawiane z
+ * dashboardu (POST /api/autonomy/lidar, pola scan_deg / pass_ms).
+ * scan_deg = polowa zakresu skanu szczelin [°], przycinane do [30,120];
+ * pass_ms = czas jazdy "przez szczeline" [ms], przycinane do [500,6000]. */
+int  autonomy_get_scan_max_deg(void);
+void autonomy_set_scan_max_deg(int deg);
+int  autonomy_get_avoid_pass_ms(void);
+void autonomy_set_avoid_pass_ms(int ms);
+
 /* Moc silników [% mocy, 0..100] przy jeździe na wprost i przy cofaniu
  * (ST_CRUISE/ST_LINE_BACKUP w autonomy.c) - wpisywana z dashboardu.
  * Wartość spoza zakresu jest przycinana. Domyślnie 35% (patrz autonomy.c). */

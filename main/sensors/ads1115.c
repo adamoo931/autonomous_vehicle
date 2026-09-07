@@ -40,8 +40,9 @@ static float s_finish_threshold_v = HALL_FINISH_THRESHOLD_V;
  * razem z bias żyra) przez ads1115_set_finish_rest_v(). */
 static float s_finish_rest_v = HALL_FINISH_REST_V;
 
-/* Reakcja na Hall mety w trybie RĘCZNYM (patrz nagłówek). Domyślnie tak. */
-static bool s_hall_manual_enabled = true;
+/* Reakcja na Hall mety w trybie RĘCZNYM (patrz nagłówek). Domyślnie NIE -
+ * nie przeszkadza w testach jazdy ręcznej; w autonomii Hall działa zawsze. */
+static bool s_hall_manual_enabled = false;
 
 /* Zapis rejestru 16-bitowego w kolejności big-endian (jak INA219). */
 static esp_err_t ads_write16(uint8_t reg, uint16_t val) {

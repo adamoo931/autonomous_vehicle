@@ -12,6 +12,8 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include <math.h>
+#include <stdlib.h>
+#include <limits.h>
 
 static const char *TAG = "AUTO";
 
@@ -192,7 +194,7 @@ static uint16_t lidar_arc_mm(int rel_center, int half) {
 #define CORRIDOR_HALF_MM        (VEHICLE_WIDTH_MM / 2 + CORRIDOR_MARGIN_MM)
 #define CORRIDOR_RAY_HALF_DEG    5     /* polowa luku pojedynczego promienia */
 #define D_OPEN_MM             4000     /* brak echa => tak daleko (kierunek otwarty) */
-#define FRONT_STOP_MM_DEF      450     /* domyslny prog zatrzymania [mm] */
+#define FRONT_STOP_MM_DEF      300     /* domyslny prog zatrzymania [mm] (dostrojone w tescie Kroku 7) */
 #define FRONT_STOP_MM_MIN     150
 #define FRONT_STOP_MM_MAX    1500
 #define OBSTACLE_DEBOUNCE_COUNT 3      /* takty petli, jak przy linii */
@@ -203,26 +205,99 @@ static volatile int s_corridor_mm    = D_OPEN_MM;   /* ostatnio policzony min. k
 
 static inline int open_mm(uint16_t v) { return v == 0 ? D_OPEN_MM : (int)v; }
 
-/* Min. odleglosc [mm] w korytarzu na wprost przy zadanym lookahead:
- * srodek + obie krawedzie pojazdu (kat krawedzi = atan(polowa_szer/lookahead)). */
-static int corridor_min_mm(int lookahead_mm) {
+/* Min. odleglosc [mm] w korytarzu na szerokosc robota wokol kierunku
+ * center_deg (wzgl. przodu, + = w lewo) przy zadanym lookahead: srodek +
+ * obie krawedzie pojazdu (kat krawedzi = atan(polowa_szer/lookahead)).
+ * Krok 7: uogolnione o kierunek - ten sam test uzywany do skanu szczelin. */
+static int corridor_min_at(int center_deg, int lookahead_mm) {
     if (lookahead_mm < 50) lookahead_mm = 50;
     float edge_rad = atanf((float)CORRIDOR_HALF_MM / (float)lookahead_mm);
     int   edge_deg = (int)(edge_rad / DEG_TO_RAD_F + 0.5f);
-    int m = open_mm(lidar_arc_mm(0,          CORRIDOR_RAY_HALF_DEG));
-    int l = open_mm(lidar_arc_mm(+edge_deg,  CORRIDOR_RAY_HALF_DEG));
-    int r = open_mm(lidar_arc_mm(-edge_deg,  CORRIDOR_RAY_HALF_DEG));
+    int m = open_mm(lidar_arc_mm(center_deg,            CORRIDOR_RAY_HALF_DEG));
+    int l = open_mm(lidar_arc_mm(center_deg + edge_deg, CORRIDOR_RAY_HALF_DEG));
+    int r = open_mm(lidar_arc_mm(center_deg - edge_deg, CORRIDOR_RAY_HALF_DEG));
     if (l < m) m = l;
     if (r < m) m = r;
     return m;
 }
+
+/* Korytarz na wprost (kierunek 0). */
+static int corridor_min_mm(int lookahead_mm) { return corridor_min_at(0, lookahead_mm); }
+
+/* =====================================================================
+ *  Krok 7: omijanie przeszkody metoda "follow-the-gap"
+ *
+ *  Gdy korytarz na wprost jest zablokowany (jak w Kroku 6), zamiast tylko
+ *  stac (ST_OBSTACLE) pojazd:
+ *    1. ST_AVOID_SCAN  - stojac, skanuje LIDAR-em kierunki wzgledne w luku
+ *       +/-s_scan_max_deg co AVOID_SCAN_STEP_DEG i dla kazdego liczy
+ *       corridor_min_at() na AVOID_LOOKAHEAD_MM. "Przejezdny" = przeswit
+ *       >= s_front_stop_mm + AVOID_CLEAR_MARGIN_MM. Z przejezdnych wybiera
+ *       ten NAJBLIZSZY namiarowi na cel (heading_err), remis rozstrzyga
+ *       wiekszy przeswit. Brak przejezdnego -> ST_OBSTACLE (jak w Kroku 6;
+ *       ucieczka z pulapek U/L to Krok 8).
+ *    2. ST_AVOID_TURN  - obrot w miejscu (moc AVOID_TURN_PCT) do kursu
+ *       szczeliny (s_avoid_heading_deg, we wspolrzednych estymatora), z
+ *       tolerancja AVOID_TURN_TOL_DEG i limitem czasu AVOID_TURN_MAX_MS.
+ *    3. ST_AVOID_SETTLE - krotki bezruch (AVOID_SETTLE_MS) po obrocie, zeby
+ *       filtr EMA zyra dogonil rzeczywistosc i ustala sie resztkowa rotacja,
+ *       zanim kurs szczeliny zostanie "zamrozony" jako cel przejazdu (Krok 7b:
+ *       przy szybkim obrocie 50 %/~65 st/s estymator gubil ~10-15 st).
+ *    4. ST_AVOID_PASS  - jazda na wprost s_avoid_pass_ms, trzymajac kurs
+ *       szczeliny regulatorem P (bez adaptacji biasu), zeby REALNIE minac
+ *       przeszkode. Kontrola korytarza dziala dalej: kolejna przeszkoda w
+ *       trakcie -> powrot do ST_AVOID_SCAN (do AVOID_MAX_RESCANS razy).
+ *    5. Po przejezdzie -> ST_CRUISE. s_heading_target_deg (prawdziwy cel)
+ *       nie jest ruszany, wiec regulator sam wraca na namiar start->meta -
+ *       ale przez AVOID_RECOVERY_MS z ograniczonym skretem (AVOID_RECOVERY_
+ *       TURN_MAX), zeby lagodnie wracac na kurs i NIE ocierac sie o dopiero
+ *       co minieta przeszkode (Krok 7b).
+ *
+ *  Wszystko czasowe (odometria zepsuta). W ST_AVOID_* linia toru ma
+ *  priorytet - kontakt przerywa manewr i uruchamia test mety (Hall). */
+#define AVOID_SCAN_MAX_DEG_DEF   80
+#define AVOID_SCAN_MAX_DEG_MIN   30
+#define AVOID_SCAN_MAX_DEG_MAX  120
+#define AVOID_SCAN_STEP_DEG      10    /* rozdzielczosc katowa skanu */
+#define AVOID_LOOKAHEAD_MM      700    /* zasieg oceny szczeliny [mm] */
+#define AVOID_CLEAR_MARGIN_MM   150    /* wymagany przeswit PONAD prog STOP [mm] */
+#define AVOID_SIDE_STICK_COST  100000  /* Krok 7c: kara w f. kosztu za zmiane strony obejscia
+                                        * w trakcie epizodu - praktycznie blokada (strona raz
+                                        * obrana obowiazuje do konca epizodu), ale wciaz mozliwe
+                                        * przejscie na 2. strone, gdy na obranej nie ma NIC. */
+#define AVOID_TURN_TOL_DEG        6.0f /* dopuszczalny blad kursu po obrocie */
+#define AVOID_TURN_PCT           45    /* Krok 7b: 50 -> 45 - wolniejszy obrot (mniejszy blad zyra),
+                                        * ale wciaz z zapasem momentu na czysty obrot w miejscu */
+#define AVOID_TURN_MAX_MS      4500    /* limit czasu obrotu - inaczej STOP */
+#define AVOID_SETTLE_MS         300    /* Krok 7b: bezruch po obrocie, przed przejazdem */
+#define AVOID_SETTLE_MIN_DEG    25     /* Krok 7b: ponizej tego obrotu nie ma po co ustalac
+                                        * (krotki obrot = maly blad zyra) - jedziemy od razu */
+#define AVOID_PASS_MS_DEF      2500    /* czas jazdy "przez szczeline" [ms] */
+#define AVOID_PASS_MS_MIN      500
+#define AVOID_PASS_MS_MAX     6000
+#define AVOID_RECOVERY_MS     1800     /* Krok 7b: okno lagodnego powrotu na kurs po przejezdzie */
+#define AVOID_RECOVERY_TURN_MAX  12    /* Krok 7b: limit skretu w tym oknie (norm. TURN_MAX=25) */
+#define AVOID_MAX_RESCANS        4     /* ile razy w jednym epizodzie ponawiac skan */
+#define AVOID_RESCAN_INTERVAL_MS 1200 /* w ST_OBSTACLE: co ile ponawiac skan */
+
+static volatile int s_scan_max_deg  = AVOID_SCAN_MAX_DEG_DEF;
+static volatile int s_avoid_pass_ms = AVOID_PASS_MS_DEF;
+static float        s_avoid_heading_deg = 0.0f;  /* kurs szczeliny (wspolrzedne estymatora) */
+static int          s_avoid_rescans = 0;         /* licznik ponowien skanu w epizodzie */
+static int          s_avoid_last_side = 0;        /* Krok 7b: strona ostatniego obejscia: -1=P, +1=L, 0=brak */
+static bool         s_avoid_turn_big = false;     /* Krok 7b: czy obrot wymaga fazy ustalania kursu */
+static uint32_t     s_avoid_recovery_until = 0;   /* Krok 7b: ms, do kiedy ograniczony skret w ST_CRUISE */
 
 /* Stany maszyny sterujacej. */
 typedef enum {
     ST_IDLE,          /* wylaczony / bezczynny */
     ST_GYRO_CAL,      /* start przejazdu - bezruch, usrednianie biasu gyro_z (Krok 2) */
     ST_CRUISE,        /* jazda na wprost */
-    ST_OBSTACLE,      /* przeszkoda w korytarzu - STOP, czeka na oczyszczenie (Krok 6) */
+    ST_OBSTACLE,      /* przeszkoda w korytarzu - STOP, brak szczeliny / czeka (Krok 6/7) */
+    ST_AVOID_SCAN,    /* Krok 7: skan LIDAR-em w poszukiwaniu przejezdnej szczeliny */
+    ST_AVOID_TURN,    /* Krok 7: obrot w miejscu do kursu wybranej szczeliny */
+    ST_AVOID_SETTLE,  /* Krok 7b: bezruch po obrocie - ustalenie estymatora kursu */
+    ST_AVOID_PASS,    /* Krok 7: jazda przez szczeline, by minac przeszkode */
     ST_LINE_WAIT,     /* linia wykryta - postoj i oczekiwanie na potwierdzenie mety Hallem */
     ST_LINE_BACKUP,   /* to nie meta - cofanie */
     ST_LINE_PAUSE,    /* krotki postoj po cofnieciu, przed ponowna proba jazdy */
@@ -298,6 +373,10 @@ static const char *state_name(st_t s) {
         case ST_GYRO_CAL:    return "Kalibracja zyroskopu";
         case ST_CRUISE:      return "Jazda";
         case ST_OBSTACLE:    return "Przeszkoda (stop)";
+        case ST_AVOID_SCAN:  return "Omijanie - skan szczelin";
+        case ST_AVOID_TURN:  return "Omijanie - obrot";
+        case ST_AVOID_SETTLE: return "Omijanie - ustalanie kursu";
+        case ST_AVOID_PASS:  return "Omijanie - przejazd";
         case ST_LINE_WAIT:   return "Linia - sprawdzam mete";
         case ST_LINE_BACKUP: return "Cofanie (nie meta)";
         case ST_LINE_PAUSE:  return "Postoj po cofnieciu";
@@ -311,14 +390,17 @@ static inline uint32_t now_ms(void) {
 }
 static inline void enter(st_t s) { s_state = s; s_state_t = now_ms(); }
 
-/* Krok 3: blad kursu (cel - biezacy), znormalizowany do (-180,180].
- * Dodatni => cel jest w lewo od biezacego kursu => trzeba skrecic w lewo. */
-static inline float heading_err(void) {
-    float e = s_heading_target_deg - s_heading_deg;
+/* Krok 3: blad kursu wzgledem dowolnego zadanego kursu, znormalizowany do
+ * (-180,180]. Dodatni => zadany kurs jest w lewo od biezacego => skret w lewo. */
+static inline float heading_err_of(float target_deg) {
+    float e = target_deg - s_heading_deg;
     while (e > 180.0f)   e -= 360.0f;
     while (e <= -180.0f) e += 360.0f;
     return e;
 }
+
+/* Blad wzgledem prawdziwego celu przejazdu (regulator ST_CRUISE). */
+static inline float heading_err(void) { return heading_err_of(s_heading_target_deg); }
 
 /* Zamraza czas trwania biezacego przejazdu (dashboard ma pokazywac czas
  * do tego momentu, nie licznik biegnacy dalej). Wolane tylko przy
@@ -411,6 +493,73 @@ static const char *edge_side_name(edge_side_t s) {
     }
 }
 
+/* Krok 5d/7: detekcja linii z debounce (wspolna dla ST_CRUISE i stanow
+ * omijania). Zwraca true dopiero po LINE_DEBOUNCE_COUNT kolejnych taktach z
+ * linia; aktualizuje s_line_debounce (zerowany, gdy linii brak). */
+static bool line_confirmed(void) {
+    if (track_line_detected()) {
+        s_line_debounce++;
+    } else {
+        s_line_debounce = 0;
+    }
+    if (s_line_debounce >= LINE_DEBOUNCE_COUNT) {
+        s_line_debounce = 0;
+        return true;
+    }
+    return false;
+}
+
+/* Krok 7: skan szczelin. Przeglada kierunki wzgledne w luku +/-s_scan_max_deg
+ * co AVOID_SCAN_STEP_DEG; kierunek jest "przejezdny", gdy corridor_min_at()
+ * na AVOID_LOOKAHEAD_MM daje przeswit >= s_front_stop_mm + AVOID_CLEAR_MARGIN_MM.
+ * Z przejezdnych wybiera najnizszy koszt: |rel - namiar|*100 - przeswit/10.
+ *
+ * Krok 7b: jesli wprost jest juz przejezdnie - jedziemy wprost (0) bez
+ * obracania.
+ *
+ * Krok 7c: "namiar" to:
+ *   - PIERWSZY skan epizodu (s_avoid_last_side == 0): rzeczywisty namiar na
+ *     cel (heading_err) - decyduje, w ktora strone obchodzimy przeszkode;
+ *   - KOLEJNE skany (re-skan w trakcie przejazdu, s_avoid_last_side != 0):
+ *     0, czyli "na wprost wzgledem biezacego kursu" - nic sie nie przerzuca
+ *     do celu, tylko przewlekamy sie do przodu po OBRANEJ stronie (kara
+ *     AVOID_SIDE_STICK_COST praktycznie blokuje przejscie na 2. strone).
+ *     Rzeczywisty cel odzyskujemy dopiero w oknie powrotu po przejezdzie.
+ *   Bez tego estymator kursu (rozhustany po szybkich obrotach) rozhustywal
+ *     tez wybor strony -> migotanie L/P miedzy skanami (test_10).
+ *
+ * Zwraca kierunek wzgledny [st] (+ = w lewo) albo INT_MIN, gdy zaden nie
+ * przechodzi. */
+static int avoid_pick_gap(void) {
+    int need = s_front_stop_mm + AVOID_CLEAR_MARGIN_MM;
+
+    /* Krok 7b: wprost wolne -> nie obracaj sie po nic. */
+    if (corridor_min_at(0, AVOID_LOOKAHEAD_MM) >= need) return 0;
+
+    int goal;
+    if (s_avoid_last_side == 0) {              /* Krok 7c: pierwszy skan epizodu */
+        goal = (int)lroundf(heading_err());
+        if (goal >  s_scan_max_deg) goal =  s_scan_max_deg;
+        if (goal < -s_scan_max_deg) goal = -s_scan_max_deg;
+    } else {
+        goal = 0;                             /* Krok 7c: re-skan - trzymaj sie przodu i strony */
+    }
+
+    int  best_rel  = INT_MIN;
+    long best_cost = LONG_MAX;
+    for (int rel = -s_scan_max_deg; rel <= s_scan_max_deg; rel += AVOID_SCAN_STEP_DEG) {
+        int clr = corridor_min_at(rel, AVOID_LOOKAHEAD_MM);
+        if (clr < need) continue;
+        /* Blizej namiaru = duzo wazniejsze (x100); przeswit tylko jako remis. */
+        long cost = (long)abs(rel - goal) * 100 - clr / 10;
+        /* Krok 7b/7c: trzymaj sie raz obranej strony obejscia. */
+        if (s_avoid_last_side < 0 && rel > 0) cost += AVOID_SIDE_STICK_COST;
+        if (s_avoid_last_side > 0 && rel < 0) cost += AVOID_SIDE_STICK_COST;
+        if (cost < best_cost) { best_cost = cost; best_rel = rel; }
+    }
+    return best_rel;
+}
+
 /* Krok 2/5c: rozpoczyna kalibracje biasu gyro_z i napiecia spoczynkowego
  * Halla - zeruje akumulatory i kurs, wchodzi w ST_GYRO_CAL (silniki stoja,
  * patrz obsluga stanu). */
@@ -426,6 +575,9 @@ static void start_gyro_cal(void) {
     s_hall_debounce = 0;
     s_obst_block_count = 0;
     s_obst_clear_count = 0;
+    s_avoid_rescans    = 0;
+    s_avoid_last_side  = 0;
+    s_avoid_recovery_until = 0;
     enter(ST_GYRO_CAL);
 }
 
@@ -493,12 +645,12 @@ static void autonomy_task(void *arg) {
             telem_t tl = telem_snapshot();
             ESP_LOGI(TAG,
                 "[%s] L=%d%% R=%d%% | kurs=%.1f cel=%.1f err=%.1f | gyroZ raw/filt=%.1f/%.1f bias=%.2f /s | "
-                "korytarz=%d/prog=%d mm | LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
+                "korytarz=%d/prog=%d mm omij_cel=%.1f | LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
                 "linia PL/TL/TP=%d/%d/%d mV | Hall=%.3fV wykryto=%d",
                 state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
                 tl.heading_deg, s_heading_target_deg, heading_err(),
                 tl.imu.gyro_z, tl.gyro_z_filt, s_gyro_bias,
-                tl.corridor_mm, s_front_stop_mm,
+                tl.corridor_mm, s_front_stop_mm, s_avoid_heading_deg,
                 tl.sec_mm[SEC_FRONT], tl.sec_mm[SEC_FRONT_L], tl.sec_mm[SEC_LEFT],
                 tl.sec_mm[SEC_REAR_L], tl.sec_mm[SEC_REAR], tl.sec_mm[SEC_REAR_R],
                 tl.sec_mm[SEC_RIGHT], tl.sec_mm[SEC_FRONT_R],
@@ -608,10 +760,11 @@ static void autonomy_task(void *arg) {
                 }
             }
 
-            /* Krok 6: kontrola korytarza przed przeszkoda. Aktywna ZAWSZE
+            /* Krok 6/7: kontrola korytarza przed przeszkoda. Aktywna ZAWSZE
              * (nie ma wyjatku startowego jak przy tasmie - przeszkoda to
              * przeszkoda). Debounce jak przy linii - LIDAR na pojedynczym
-             * sektorze potrafi skoczyc. Na razie tylko STOP, bez omijania. */
+             * sektorze potrafi skoczyc. Krok 7: po potwierdzeniu przeszkody
+             * przechodzimy do skanu szczelin (omijanie), nie do samego STOP. */
             {
                 int cmin = corridor_min_mm(s_front_stop_mm);
                 s_corridor_mm = cmin;
@@ -623,10 +776,11 @@ static void autonomy_task(void *arg) {
                 if (s_obst_block_count >= OBSTACLE_DEBOUNCE_COUNT) {
                     s_obst_block_count = 0;
                     s_obst_clear_count = 0;
-                    ESP_LOGI(TAG, "Przeszkoda w korytarzu (%d mm < prog %d mm) - STOP.",
+                    s_avoid_rescans    = 0;
+                    ESP_LOGI(TAG, "Przeszkoda w korytarzu (%d mm < prog %d mm) - szukam szczeliny.",
                              cmin, s_front_stop_mm);
                     motor_stop();
-                    enter(ST_OBSTACLE);
+                    enter(ST_AVOID_SCAN);
                     break;
                 }
             }
@@ -637,16 +791,26 @@ static void autonomy_task(void *arg) {
             {
                 float err = heading_err();
 
+                /* Krok 7b: okno lagodnego powrotu po ominieciu przeszkody -
+                 * mocno ograniczony skret (i bez adaptacji biasu), zeby po
+                 * przejezdzie wracac na kurs celu szerokim, spokojnym lukiem,
+                 * nie ocierajac sie o dopiero co minieta przeszkode. Kontrola
+                 * korytarza dziala dalej - realne zblizenie i tak zatrzyma. */
+                bool recovering = (s_avoid_recovery_until != 0 && now < s_avoid_recovery_until);
+                if (!recovering) s_avoid_recovery_until = 0;
+
                 /* Krok 4b: adaptacja biasu - tylko w ustalonej jezdzie prostej
                  * (maly blad kursu I mala filtrowana predkosc katowa), zeby
                  * nie mylic prawdziwych korekt/manewrow z rezydualnym biasem. */
-                if (fabsf(err) < BIAS_ADAPT_ERR_MAX && fabsf(s_gyro_z_filt) < BIAS_ADAPT_RATE_MAX_DPS) {
+                if (!recovering &&
+                    fabsf(err) < BIAS_ADAPT_ERR_MAX && fabsf(s_gyro_z_filt) < BIAS_ADAPT_RATE_MAX_DPS) {
                     s_gyro_bias += BIAS_ADAPT_RATE * (s_gyro_z_filt - s_gyro_bias);
                 }
 
+                float tmax = recovering ? (float)AVOID_RECOVERY_TURN_MAX : (float)TURN_MAX;
                 float turn = KP_HEADING * err + DRIVE_TRIM;
-                if (turn >  (float)TURN_MAX) turn =  (float)TURN_MAX;
-                if (turn < -(float)TURN_MAX) turn = -(float)TURN_MAX;
+                if (turn >  tmax) turn =  tmax;
+                if (turn < -tmax) turn = -tmax;
                 int td = (int)lroundf(turn);   /* zaokraglenie, nie obciecie - unika martwej strefy +/-1% */
                 motor_set_left (s_speed_pct - td);
                 motor_set_right(s_speed_pct + td);
@@ -654,9 +818,11 @@ static void autonomy_task(void *arg) {
             break;
 
         case ST_OBSTACLE:
-            /* Krok 6: STOP przed przeszkoda. Auto-wznowienie, gdy korytarz
-             * sie oczysci (debounce, zeby nie migotalo na szumie LIDAR).
-             * Omijanie dojdzie w Kroku 7 - tu pojazd po prostu czeka. */
+            /* Krok 6/7: STOP - brak przejezdnej szczeliny (albo przekroczony
+             * limit ponowien w epizodzie omijania). Dwa wyjscia:
+             *  - korytarz na wprost sie oczysci (przeszkoda usunieta) -> jazda,
+             *  - co AVOID_RESCAN_INTERVAL_MS ponow skan szczelin (przeszkoda
+             *    mogla sie zmienic). Ucieczka z pulapek U/L to Krok 8. */
             motor_stop();
             {
                 int cmin = corridor_min_mm(s_front_stop_mm);
@@ -669,12 +835,180 @@ static void autonomy_task(void *arg) {
                 if (s_obst_clear_count >= OBSTACLE_DEBOUNCE_COUNT) {
                     s_obst_clear_count = 0;
                     s_obst_block_count = 0;
+                    s_avoid_rescans    = 0;
+                    s_avoid_last_side  = 0;
                     ESP_LOGI(TAG, "Korytarz oczyszczony (%d mm >= prog %d mm) - jade dalej.",
                              cmin, s_front_stop_mm);
                     enter(ST_CRUISE);
+                    break;
+                }
+                if (now - s_state_t >= AVOID_RESCAN_INTERVAL_MS) {
+                    s_obst_clear_count = 0;
+                    s_avoid_rescans    = 0;
+                    s_avoid_last_side  = 0;   /* Krok 7c: nowy skan - wolna reka co do strony */
+                    ESP_LOGI(TAG, "Przeszkoda nadal (%d mm) - ponawiam skan szczelin.", cmin);
+                    enter(ST_AVOID_SCAN);
                 }
             }
             break;
+
+        case ST_AVOID_SCAN: {
+            /* Krok 7: stojac, wybierz przejezdna szczeline najblizsza celowi.
+             * Linia toru ma priorytet - kontakt przerywa omijanie. */
+            motor_stop();
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Omijanie: linia w trakcie skanu (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            int gap = avoid_pick_gap();
+            if (gap == INT_MIN) {
+                ESP_LOGI(TAG, "Omijanie: brak przejezdnej szczeliny w +/-%d st - STOP.", s_scan_max_deg);
+                enter(ST_OBSTACLE);
+                break;
+            }
+            s_avoid_heading_deg = s_heading_deg + (float)gap;
+            while (s_avoid_heading_deg > 180.0f)   s_avoid_heading_deg -= 360.0f;
+            while (s_avoid_heading_deg <= -180.0f) s_avoid_heading_deg += 360.0f;
+            s_obst_block_count = 0;
+            /* Krok 7b: zapamietaj strone obejscia (do trzymania sie jej przy
+             * kolejnych skanach w tym epizodzie). 0 = szczelina praktycznie
+             * na wprost -> pomijamy obrot i ustalanie, jedziemy od razu. */
+            if (gap >  AVOID_SCAN_STEP_DEG / 2) s_avoid_last_side =  1;
+            else if (gap < -AVOID_SCAN_STEP_DEG / 2) s_avoid_last_side = -1;
+            if (fabsf((float)gap) <= AVOID_TURN_TOL_DEG) {
+                ESP_LOGI(TAG, "Omijanie: szczelina na wprost (rel=%+d st) - przejazd %d ms.",
+                         gap, s_avoid_pass_ms);
+                enter(ST_AVOID_PASS);
+                break;
+            }
+            s_avoid_turn_big = (abs(gap) >= AVOID_SETTLE_MIN_DEG);
+            ESP_LOGI(TAG, "Omijanie: szczelina rel=%+d st (kurs docelowy %.1f st, przeswit >= %d mm) - obrot.",
+                     gap, s_avoid_heading_deg, s_front_stop_mm + AVOID_CLEAR_MARGIN_MM);
+            enter(ST_AVOID_TURN);
+            break;
+        }
+
+        case ST_AVOID_TURN: {
+            /* Krok 7: obrot w miejscu do kursu szczeliny. */
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Omijanie: linia w trakcie obrotu (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            float err = heading_err_of(s_avoid_heading_deg);
+            if (fabsf(err) <= AVOID_TURN_TOL_DEG) {
+                motor_stop();
+                if (s_avoid_turn_big) {
+                    ESP_LOGI(TAG, "Omijanie: obrot zakonczony (kurs %.1f st, blad %.1f st) - ustalanie %d ms.",
+                             s_heading_deg, err, AVOID_SETTLE_MS);
+                    enter(ST_AVOID_SETTLE);
+                } else {
+                    ESP_LOGI(TAG, "Omijanie: obrot zakonczony (kurs %.1f st, blad %.1f st) - przejazd %d ms.",
+                             s_heading_deg, err, s_avoid_pass_ms);
+                    enter(ST_AVOID_PASS);
+                }
+                break;
+            }
+            if (now - s_state_t >= AVOID_TURN_MAX_MS) {
+                ESP_LOGW(TAG, "Omijanie: obrot nie osiagnal kursu w %d ms (blad %.1f st) - STOP.",
+                         AVOID_TURN_MAX_MS, err);
+                motor_stop();
+                s_avoid_last_side = 0;
+                enter(ST_OBSTACLE);
+                break;
+            }
+            int p = AVOID_TURN_PCT;
+            if (err > 0.0f) { motor_set_left(-p); motor_set_right( p); }  /* w lewo (CCW) */
+            else            { motor_set_left( p); motor_set_right(-p); }  /* w prawo (CW) */
+            break;
+        }
+
+        case ST_AVOID_SETTLE:
+            /* Krok 7b: bezruch po obrocie. Filtr EMA zyra ma staly czasowy
+             * rzedu kilku taktow, a po szybkim obrocie przez chwile jeszcze
+             * "nadganialby" kurs w trakcie przejazdu, przez co s_avoid_heading_
+             * deg jako cel bylby przekrzywiony. Krotki postoj pozwala kursowi
+             * sie ustabilizowac. Linia toru dalej priorytetowo. */
+            motor_stop();
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Omijanie: linia w trakcie ustalania (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            if (now - s_state_t >= AVOID_SETTLE_MS) {
+                ESP_LOGI(TAG, "Omijanie: kurs ustalony (%.1f st, cel szczeliny %.1f st) - przejazd %d ms.",
+                         s_heading_deg, s_avoid_heading_deg, s_avoid_pass_ms);
+                enter(ST_AVOID_PASS);
+            }
+            break;
+
+        case ST_AVOID_PASS: {
+            /* Krok 7: jazda przez szczeline, by REALNIE minac przeszkode.
+             * Linia toru ma priorytet; korytarz kontrolowany dalej. */
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Omijanie: linia w trakcie przejazdu (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            {
+                int cmin = corridor_min_mm(s_front_stop_mm);
+                s_corridor_mm = cmin;
+                if (cmin < s_front_stop_mm) {
+                    s_obst_block_count++;
+                } else {
+                    s_obst_block_count = 0;
+                }
+                if (s_obst_block_count >= OBSTACLE_DEBOUNCE_COUNT) {
+                    s_obst_block_count = 0;
+                    motor_stop();
+                    if (++s_avoid_rescans > AVOID_MAX_RESCANS) {
+                        ESP_LOGW(TAG, "Omijanie: %d ponowien bez efektu - STOP.", s_avoid_rescans - 1);
+                        s_avoid_rescans   = 0;
+                        s_avoid_last_side = 0;
+                        enter(ST_OBSTACLE);
+                    } else {
+                        ESP_LOGI(TAG, "Omijanie: przeszkoda w trakcie przejazdu (%d mm) - ponowny skan (%d/%d).",
+                                 cmin, s_avoid_rescans, AVOID_MAX_RESCANS);
+                        enter(ST_AVOID_SCAN);
+                    }
+                    break;
+                }
+            }
+            if (now - s_state_t >= (uint32_t)s_avoid_pass_ms) {
+                s_avoid_rescans = 0;
+                s_avoid_last_side = 0;
+                /* Krok 7b: lagodny powrot na kurs celu (ograniczony skret przez
+                 * AVOID_RECOVERY_MS) - patrz ST_CRUISE. */
+                s_avoid_recovery_until = now + AVOID_RECOVERY_MS;
+                ESP_LOGI(TAG, "Omijanie: przejazd zakonczony - lagodny powrot na kurs celu (%.1f st).",
+                         s_heading_target_deg);
+                enter(ST_CRUISE);
+                break;
+            }
+            {
+                float err  = heading_err_of(s_avoid_heading_deg);
+                float turn = KP_HEADING * err + DRIVE_TRIM;
+                if (turn >  (float)TURN_MAX) turn =  (float)TURN_MAX;
+                if (turn < -(float)TURN_MAX) turn = -(float)TURN_MAX;
+                int td = (int)lroundf(turn);
+                motor_set_left (s_speed_pct - td);
+                motor_set_right(s_speed_pct + td);
+            }
+            break;
+        }
 
         case ST_LINE_WAIT:
             /* Stoj i odliczaj. Meta (Hall) obsluzona wyzej, priorytetowo -
@@ -820,6 +1154,24 @@ void autonomy_set_front_stop_mm(int mm) {
     if (mm > FRONT_STOP_MM_MAX) mm = FRONT_STOP_MM_MAX;
     s_front_stop_mm = mm;
     ESP_LOGI(TAG, "Prog STOP przed przeszkoda = %d mm.", mm);
+}
+
+/* --- Krok 7: parametry omijania (nastawialne z dashboardu). --- */
+int autonomy_get_scan_max_deg(void)  { return s_scan_max_deg; }
+int autonomy_get_avoid_pass_ms(void) { return s_avoid_pass_ms; }
+
+void autonomy_set_scan_max_deg(int deg) {
+    if (deg < AVOID_SCAN_MAX_DEG_MIN) deg = AVOID_SCAN_MAX_DEG_MIN;
+    if (deg > AVOID_SCAN_MAX_DEG_MAX) deg = AVOID_SCAN_MAX_DEG_MAX;
+    s_scan_max_deg = deg;
+    ESP_LOGI(TAG, "Zakres skanu szczelin = +/-%d st.", deg);
+}
+
+void autonomy_set_avoid_pass_ms(int ms) {
+    if (ms < AVOID_PASS_MS_MIN) ms = AVOID_PASS_MS_MIN;
+    if (ms > AVOID_PASS_MS_MAX) ms = AVOID_PASS_MS_MAX;
+    s_avoid_pass_ms = ms;
+    ESP_LOGI(TAG, "Czas jazdy przez szczeline = %d ms.", ms);
 }
 
 void autonomy_set_speed_pct(int pct) {

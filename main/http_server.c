@@ -114,7 +114,7 @@ static const char DASHBOARD_HTML[] =
     "    </div>\n"
     "    <div style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"hl-thr-cur\">-</span> V (odchy&#322;ka od spoczynku)</div>\n"
     "    <div style=\"font-size:0.85em;color:#8b949e\">spoczynek (auto-kalibracja Kroku 5c): <span class=\"val\" id=\"hl-rest-cur\">-</span> V</div>\n"
-    "    <label style=\"display:block;margin-top:6px;font-size:0.9em\"><input type=\"checkbox\" id=\"hl-manual\" onchange=\"setHallManual()\" checked> reaguj na Hall w je&#378;dzie r&#281;cznej</label>\n"
+    "    <label style=\"display:block;margin-top:6px;font-size:0.9em\"><input type=\"checkbox\" id=\"hl-manual\" onchange=\"setHallManual()\"> reaguj na Hall w je&#378;dzie r&#281;cznej</label>\n"
     "    <div style=\"font-size:0.8em;color:#8b949e\">(w autonomii Hall dzia&#322;a zawsze, niezale&#380;nie od tego)</div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
@@ -206,7 +206,14 @@ static const char DASHBOARD_HTML[] =
     "    <label>LIDAR &#8211; offset przodu:</label>\n"
     "    <input type=\"number\" id=\"auto-lidfront-in\" min=\"-180\" max=\"359\" step=\"1\" value=\"0\" style=\"width:70px\"><span>&#176;</span>\n"
     "    <label style=\"margin-left:8px\">STOP przed przeszkod&#261;:</label>\n"
-    "    <input type=\"number\" id=\"auto-stopmm-in\" min=\"150\" max=\"1500\" step=\"10\" value=\"450\" style=\"width:80px\"><span>mm</span>\n"
+    "    <input type=\"number\" id=\"auto-stopmm-in\" min=\"150\" max=\"1500\" step=\"10\" value=\"300\" style=\"width:80px\"><span>mm</span>\n"
+    "    <button onclick=\"setLidar()\">Zapisz</button>\n"
+    "  </div>\n"
+    "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
+    "    <label>Omijanie &#8211; zakres skanu:</label>\n"
+    "    <input type=\"number\" id=\"auto-scandeg-in\" min=\"30\" max=\"120\" step=\"5\" value=\"80\" style=\"width:70px\"><span>&#177;&#176;</span>\n"
+    "    <label style=\"margin-left:8px\">czas przez szczelin&#281;:</label>\n"
+    "    <input type=\"number\" id=\"auto-passms-in\" min=\"500\" max=\"6000\" step=\"100\" value=\"2500\" style=\"width:80px\"><span>ms</span>\n"
     "    <button onclick=\"setLidar()\">Zapisz</button>\n"
     "  </div>\n"
     "  <div style=\"font-size:0.82em;color:#8b949e;margin-top:6px;font-family:monospace\">\n"
@@ -216,7 +223,7 @@ static const char DASHBOARD_HTML[] =
     "korytarz: <span class=\"val\" id=\"auto-corr\">-</span>/<span class=\"val\" id=\"auto-stopmm-cur\">-</span> mm &nbsp; "
     "LIDAR P/PL/L/TL/T/TP/R/PP: <span class=\"val\" id=\"auto-sectors\">-</span> mm\n"
     "  </div>\n"
-    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost ustawion&#261; pr&#281;dko&#347;ci&#261;, trzymaj&#261;c kurs. Przeszkoda w korytarzu (LIDAR) bli&#380;ej ni&#380; pr&#243;g &#8594; STOP i czeka na oczyszczenie (bez omijania &#8211; to Krok 7). Po wykryciu linii toru staje na ~1,5 s i czeka na Hall &#8211; je&#347;li meta, ko&#324;czy przejazd; je&#347;li nie, cofa si&#281; i jedzie dalej. Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log pobierz zaraz po je&#378;dzie &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
+    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost ustawion&#261; pr&#281;dko&#347;ci&#261;, trzymaj&#261;c kurs. Przeszkoda w korytarzu (LIDAR) bli&#380;ej ni&#380; pr&#243;g &#8594; skan szczelin, obr&#243;t ku najlepszej szczelinie w stron&#281; celu i przejazd obok przeszkody (Krok 7); brak szczeliny &#8594; STOP i ponawianie skanu. Po wykryciu linii toru staje na ~1,5 s i czeka na Hall &#8211; je&#347;li meta, ko&#324;czy przejazd; je&#347;li nie, cofa si&#281; i jedzie dalej. Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log pobierz zaraz po je&#378;dzie &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
     "</div>\n"
     "\n"
     "<div class=\"card\" style=\"margin-bottom:8px\">\n"
@@ -388,6 +395,12 @@ static const char DASHBOARD_HTML[] =
     "        if(document.activeElement!==lfi && !lfi.dataset.touched){lfi.value=d.autonomy.lid_front_deg;}\n"
     "        var smi=document.getElementById('auto-stopmm-in');\n"
     "        if(document.activeElement!==smi && !smi.dataset.touched){smi.value=d.autonomy.front_stop_mm;}\n"
+    "        if(typeof d.autonomy.scan_max_deg!=='undefined'){\n"
+    "          var sdi=document.getElementById('auto-scandeg-in');\n"
+    "          if(document.activeElement!==sdi && !sdi.dataset.touched){sdi.value=d.autonomy.scan_max_deg;}\n"
+    "          var pmi=document.getElementById('auto-passms-in');\n"
+    "          if(document.activeElement!==pmi && !pmi.dataset.touched){pmi.value=d.autonomy.avoid_pass_ms;}\n"
+    "        }\n"
     "      }\n"
     "    }\n"
     "    if(d.line_test){\n"
@@ -432,18 +445,27 @@ static const char DASHBOARD_HTML[] =
     "}\n"
     "document.getElementById('auto-lidfront-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "document.getElementById('auto-stopmm-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "document.getElementById('auto-scandeg-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "document.getElementById('auto-passms-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "function setLidar(){\n"
     "  var fd=parseInt(document.getElementById('auto-lidfront-in').value);\n"
     "  var sm=parseInt(document.getElementById('auto-stopmm-in').value);\n"
+    "  var sd=parseInt(document.getElementById('auto-scandeg-in').value);\n"
+    "  var pm=parseInt(document.getElementById('auto-passms-in').value);\n"
     "  var body={};\n"
     "  if(!isNaN(fd))body.front_deg=fd;\n"
     "  if(!isNaN(sm))body.stop_mm=sm;\n"
+    "  if(!isNaN(sd))body.scan_deg=sd;\n"
+    "  if(!isNaN(pm))body.pass_ms=pm;\n"
     "  fetch('/api/autonomy/lidar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})\n"
     "    .then(function(r){return r.json();})\n"
     "    .then(function(d){\n"
     "      var lfi=document.getElementById('auto-lidfront-in');delete lfi.dataset.touched;\n"
     "      var smi=document.getElementById('auto-stopmm-in');delete smi.dataset.touched;\n"
+    "      var sdi=document.getElementById('auto-scandeg-in');delete sdi.dataset.touched;\n"
+    "      var pmi=document.getElementById('auto-passms-in');delete pmi.dataset.touched;\n"
     "      if(d&&typeof d.lid_front_deg!=='undefined'){lfi.value=d.lid_front_deg;smi.value=d.front_stop_mm;}\n"
+    "      if(d&&typeof d.scan_deg!=='undefined'){sdi.value=d.scan_deg;pmi.value=d.pass_ms;}\n"
     "    }).catch(function(){});\n"
     "}\n"
     "document.getElementById('hl-thr-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
@@ -695,6 +717,9 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(autoj, "lid_front_deg", autonomy_get_lid_front_deg());
     cJSON_AddNumberToObject(autoj, "front_stop_mm", autonomy_get_front_stop_mm());
     cJSON_AddNumberToObject(autoj, "corridor_mm",   autonomy_get_corridor_mm());
+    /* Krok 7: parametry omijania (follow-the-gap). */
+    cJSON_AddNumberToObject(autoj, "scan_max_deg",  autonomy_get_scan_max_deg());
+    cJSON_AddNumberToObject(autoj, "avoid_pass_ms", autonomy_get_avoid_pass_ms());
     {
         int16_t secs[8];
         autonomy_get_lidar_sectors_mm(secs);
@@ -1060,21 +1085,27 @@ static esp_err_t handle_autonomy_speed(httpd_req_t *req) {
     return ESP_OK;
 }
 
-/* POST /api/autonomy/lidar {"front_deg":N,"stop_mm":N} - Krok 6: kalibracja
- * kontroli korytarza. front_deg = offset przodu głowicy LIDAR [°] (dobierany
- * z tools/lidar_map.py); stop_mm = próg zatrzymania przed przeszkodą [mm]
- * (autonomy.c przycina do [150,1500]). Oba pola opcjonalne. Odpowiada
- * aktualnymi wartościami. */
+/* POST /api/autonomy/lidar {"front_deg":N,"stop_mm":N,"scan_deg":N,"pass_ms":N}
+ * Krok 6/7: kalibracja kontroli korytarza i parametry omijania. front_deg =
+ * offset przodu głowicy LIDAR [°] (dobierany z tools/lidar_map.py); stop_mm =
+ * próg zatrzymania przed przeszkodą [mm] (przycinany do [150,1500]); scan_deg =
+ * połowa zakresu skanu szczelin [°] (Krok 7, przycinany do [30,120]); pass_ms =
+ * czas jazdy przez szczelinę [ms] (Krok 7, przycinany do [500,6000]). Wszystkie
+ * pola opcjonalne. Odpowiada aktualnymi wartościami. */
 static esp_err_t handle_autonomy_lidar(httpd_req_t *req) {
     if (req->content_len > 0) {
-        char buf[96];
+        char buf[160];
         if (read_body(req, buf, sizeof(buf)) > 0) {
             cJSON *j = cJSON_Parse(buf);
             if (j) {
                 cJSON *fd = cJSON_GetObjectItem(j, "front_deg");
                 cJSON *sm = cJSON_GetObjectItem(j, "stop_mm");
+                cJSON *sd = cJSON_GetObjectItem(j, "scan_deg");
+                cJSON *pm = cJSON_GetObjectItem(j, "pass_ms");
                 if (cJSON_IsNumber(fd)) autonomy_set_lid_front_deg((int)fd->valuedouble);
                 if (cJSON_IsNumber(sm)) autonomy_set_front_stop_mm((int)sm->valuedouble);
+                if (cJSON_IsNumber(sd)) autonomy_set_scan_max_deg((int)sd->valuedouble);
+                if (cJSON_IsNumber(pm)) autonomy_set_avoid_pass_ms((int)pm->valuedouble);
                 cJSON_Delete(j);
             }
         }
@@ -1082,6 +1113,8 @@ static esp_err_t handle_autonomy_lidar(httpd_req_t *req) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "lid_front_deg", autonomy_get_lid_front_deg());
     cJSON_AddNumberToObject(root, "front_stop_mm", autonomy_get_front_stop_mm());
+    cJSON_AddNumberToObject(root, "scan_deg",      autonomy_get_scan_max_deg());
+    cJSON_AddNumberToObject(root, "pass_ms",       autonomy_get_avoid_pass_ms());
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
