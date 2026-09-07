@@ -114,6 +114,8 @@ static const char DASHBOARD_HTML[] =
     "    </div>\n"
     "    <div style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"hl-thr-cur\">-</span> V (odchy&#322;ka od spoczynku)</div>\n"
     "    <div style=\"font-size:0.85em;color:#8b949e\">spoczynek (auto-kalibracja Kroku 5c): <span class=\"val\" id=\"hl-rest-cur\">-</span> V</div>\n"
+    "    <label style=\"display:block;margin-top:6px;font-size:0.9em\"><input type=\"checkbox\" id=\"hl-manual\" onchange=\"setHallManual()\" checked> reaguj na Hall w je&#378;dzie r&#281;cznej</label>\n"
+    "    <div style=\"font-size:0.8em;color:#8b949e\">(w autonomii Hall dzia&#322;a zawsze, niezale&#380;nie od tego)</div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#128207; Odometria</h2>\n"
@@ -200,13 +202,21 @@ static const char DASHBOARD_HTML[] =
     "    <button onclick=\"setSpeed()\">Zapisz</button>\n"
     "    <span style=\"font-size:0.85em;color:#8b949e\">ustawiona: <span class=\"val\" id=\"auto-speed-cur\">-</span>%</span>\n"
     "  </div>\n"
+    "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
+    "    <label>LIDAR &#8211; offset przodu:</label>\n"
+    "    <input type=\"number\" id=\"auto-lidfront-in\" min=\"-180\" max=\"359\" step=\"1\" value=\"0\" style=\"width:70px\"><span>&#176;</span>\n"
+    "    <label style=\"margin-left:8px\">STOP przed przeszkod&#261;:</label>\n"
+    "    <input type=\"number\" id=\"auto-stopmm-in\" min=\"150\" max=\"1500\" step=\"10\" value=\"450\" style=\"width:80px\"><span>mm</span>\n"
+    "    <button onclick=\"setLidar()\">Zapisz</button>\n"
+    "  </div>\n"
     "  <div style=\"font-size:0.82em;color:#8b949e;margin-top:6px;font-family:monospace\">\n"
     "    kurs: <span class=\"val\" id=\"auto-heading\">-</span>&#176; / cel <span class=\"val\" id=\"auto-htgt\">-</span>&#176; &nbsp; "
     "gyro_z raw/filt: <span class=\"val\" id=\"auto-gyroz\">-</span>&#176;/s &nbsp; "
     "bias: <span class=\"val\" id=\"auto-gbias\">-</span>&#176;/s &nbsp; "
+    "korytarz: <span class=\"val\" id=\"auto-corr\">-</span>/<span class=\"val\" id=\"auto-stopmm-cur\">-</span> mm &nbsp; "
     "LIDAR P/PL/L/TL/T/TP/R/PP: <span class=\"val\" id=\"auto-sectors\">-</span> mm\n"
     "  </div>\n"
-    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost ustawion&#261; pr&#281;dko&#347;ci&#261;. Po wykryciu linii toru (czujniki odbiciowe ADC) staje na ~1,5 s i czeka na czujnik Halla &#8211; je&#347;li to meta, ko&#324;czy przejazd; je&#347;li nie, cofa si&#281; ~2 s i jedzie dalej. Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log z przejazdu pobierz zaraz po zako&#324;czeniu jazdy &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
+    "  <div style=\"font-size:0.8em;color:#8b949e;margin-top:6px\">Etap 1: pojazd jedzie na wprost ustawion&#261; pr&#281;dko&#347;ci&#261;, trzymaj&#261;c kurs. Przeszkoda w korytarzu (LIDAR) bli&#380;ej ni&#380; pr&#243;g &#8594; STOP i czeka na oczyszczenie (bez omijania &#8211; to Krok 7). Po wykryciu linii toru staje na ~1,5 s i czeka na Hall &#8211; je&#347;li meta, ko&#324;czy przejazd; je&#347;li nie, cofa si&#281; i jedzie dalej. Dowolny ruch r&#281;czny lub STOP przerywa autonomi&#281;. Log pobierz zaraz po je&#378;dzie &#8211; nast&#281;pny przejazd go nadpisuje.</div>\n"
     "</div>\n"
     "\n"
     "<div class=\"card\" style=\"margin-bottom:8px\">\n"
@@ -327,6 +337,10 @@ static const char DASHBOARD_HTML[] =
     "      if(typeof d.hall.finish_rest_v!=='undefined'){\n"
     "        document.getElementById('hl-rest-cur').textContent=d.hall.finish_rest_v.toFixed(3);\n"
     "      }\n"
+    "      if(typeof d.hall.manual_enabled!=='undefined'){\n"
+    "        var hm=document.getElementById('hl-manual');\n"
+    "        if(document.activeElement!==hm) hm.checked=d.hall.manual_enabled;\n"
+    "      }\n"
     "    }\n"
     "    if(d.line_sensors){\n"
     "      var ls=d.line_sensors;\n"
@@ -366,6 +380,14 @@ static const char DASHBOARD_HTML[] =
     "        document.getElementById('auto-gbias').textContent=d.autonomy.gyro_bias_dps.toFixed(2);\n"
     "        var sc=d.autonomy.lidar_sectors_mm||[];\n"
     "        document.getElementById('auto-sectors').textContent=sc.join('/');\n"
+    "      }\n"
+    "      if(typeof d.autonomy.corridor_mm!=='undefined'){\n"
+    "        document.getElementById('auto-corr').textContent=d.autonomy.corridor_mm;\n"
+    "        document.getElementById('auto-stopmm-cur').textContent=d.autonomy.front_stop_mm;\n"
+    "        var lfi=document.getElementById('auto-lidfront-in');\n"
+    "        if(document.activeElement!==lfi && !lfi.dataset.touched){lfi.value=d.autonomy.lid_front_deg;}\n"
+    "        var smi=document.getElementById('auto-stopmm-in');\n"
+    "        if(document.activeElement!==smi && !smi.dataset.touched){smi.value=d.autonomy.front_stop_mm;}\n"
     "      }\n"
     "    }\n"
     "    if(d.line_test){\n"
@@ -408,6 +430,22 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('auto-speed-cur').textContent=d.speed_pct;\n"
     "    }}).catch(function(){});\n"
     "}\n"
+    "document.getElementById('auto-lidfront-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "document.getElementById('auto-stopmm-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "function setLidar(){\n"
+    "  var fd=parseInt(document.getElementById('auto-lidfront-in').value);\n"
+    "  var sm=parseInt(document.getElementById('auto-stopmm-in').value);\n"
+    "  var body={};\n"
+    "  if(!isNaN(fd))body.front_deg=fd;\n"
+    "  if(!isNaN(sm))body.stop_mm=sm;\n"
+    "  fetch('/api/autonomy/lidar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){\n"
+    "      var lfi=document.getElementById('auto-lidfront-in');delete lfi.dataset.touched;\n"
+    "      var smi=document.getElementById('auto-stopmm-in');delete smi.dataset.touched;\n"
+    "      if(d&&typeof d.lid_front_deg!=='undefined'){lfi.value=d.lid_front_deg;smi.value=d.front_stop_mm;}\n"
+    "    }).catch(function(){});\n"
+    "}\n"
     "document.getElementById('hl-thr-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "function setHallThreshold(){\n"
     "  var v=parseFloat(document.getElementById('hl-thr-in').value);\n"
@@ -419,6 +457,13 @@ static const char DASHBOARD_HTML[] =
     "      hti.value=d.finish_threshold_v.toFixed(3);\n"
     "      document.getElementById('hl-thr-cur').textContent=d.finish_threshold_v.toFixed(3);\n"
     "    }}).catch(function(){});\n"
+    "}\n"
+    "function setHallManual(){\n"
+    "  var en=document.getElementById('hl-manual').checked;\n"
+    "  fetch('/api/hall/manual',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:en})})\n"
+    "    .then(function(r){return r.json();})\n"
+    "    .then(function(d){if(d&&typeof d.manual_enabled!=='undefined'){document.getElementById('hl-manual').checked=d.manual_enabled;}})\n"
+    "    .catch(function(){});\n"
     "}\n"
     "\n"
     "var ltOn=false;\n"
@@ -608,6 +653,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(hallj,   "finish_detected",    hall.finish_detected);
     cJSON_AddNumberToObject(hallj, "finish_threshold_v", (double)ads1115_get_finish_threshold());
     cJSON_AddNumberToObject(hallj, "finish_rest_v",      (double)ads1115_get_finish_rest_v());
+    cJSON_AddBoolToObject(hallj,   "manual_enabled",     ads1115_get_hall_manual_enabled());
     cJSON_AddNumberToObject(hallj, "address",            hall.address);
     cJSON_AddBoolToObject(hallj,   "initialized",        hall.initialized);
     cJSON_AddItemToObject(root, "hall", hallj);
@@ -645,6 +691,10 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(autoj, "gyro_z_filt_dps", (double)autonomy_get_gyro_z_filt_dps());
     cJSON_AddNumberToObject(autoj, "gyro_bias_dps", (double)autonomy_get_gyro_bias_dps());
     cJSON_AddNumberToObject(autoj, "heading_target_deg", (double)autonomy_get_heading_target_deg());
+    /* Krok 6: kontrola korytarza (LIDAR). */
+    cJSON_AddNumberToObject(autoj, "lid_front_deg", autonomy_get_lid_front_deg());
+    cJSON_AddNumberToObject(autoj, "front_stop_mm", autonomy_get_front_stop_mm());
+    cJSON_AddNumberToObject(autoj, "corridor_mm",   autonomy_get_corridor_mm());
     {
         int16_t secs[8];
         autonomy_get_lidar_sectors_mm(secs);
@@ -875,7 +925,7 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         "czas_ms,stan,silnik_L_proc,silnik_R_proc,"
         "gyro_x_dps,gyro_y_dps,gyro_z_dps,gyro_z_filt_dps,gyro_bias_dps,kurs_deg,"
         "lidar_przod_mm,lidar_przodL_mm,lidar_lewo_mm,lidar_tylL_mm,"
-        "lidar_tyl_mm,lidar_tylP_mm,lidar_prawo_mm,lidar_przodP_mm,"
+        "lidar_tyl_mm,lidar_tylP_mm,lidar_prawo_mm,lidar_przodP_mm,korytarz_mm,"
         "linia_PL_mV,linia_TL_mV,linia_TP_mV,hall_mV,hall_wykryto,"
         "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
     httpd_resp_send_chunk(req, header, strlen(header));
@@ -888,13 +938,13 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         float obj = r.obj_temp_x10 / 10.0f;
         float amb = r.amb_temp_x10 / 10.0f;
         int len = snprintf(buf, sizeof(buf),
-            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
             (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
             r.motor_l, r.motor_r,
             r.gyro_x_x10 / 10.0f, r.gyro_y_x10 / 10.0f, r.gyro_z_x10 / 10.0f,
             r.gyro_zf_x10 / 10.0f, r.gyro_bias_x10 / 10.0f, r.heading_x10 / 10.0f,
             r.lidar_mm[0], r.lidar_mm[1], r.lidar_mm[2], r.lidar_mm[3],
-            r.lidar_mm[4], r.lidar_mm[5], r.lidar_mm[6], r.lidar_mm[7],
+            r.lidar_mm[4], r.lidar_mm[5], r.lidar_mm[6], r.lidar_mm[7], r.corridor_mm,
             r.line_fl_mv, r.line_bl_mv, r.line_br_mv, r.hall_mv, r.hall_hit,
             obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
@@ -1010,6 +1060,36 @@ static esp_err_t handle_autonomy_speed(httpd_req_t *req) {
     return ESP_OK;
 }
 
+/* POST /api/autonomy/lidar {"front_deg":N,"stop_mm":N} - Krok 6: kalibracja
+ * kontroli korytarza. front_deg = offset przodu głowicy LIDAR [°] (dobierany
+ * z tools/lidar_map.py); stop_mm = próg zatrzymania przed przeszkodą [mm]
+ * (autonomy.c przycina do [150,1500]). Oba pola opcjonalne. Odpowiada
+ * aktualnymi wartościami. */
+static esp_err_t handle_autonomy_lidar(httpd_req_t *req) {
+    if (req->content_len > 0) {
+        char buf[96];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *fd = cJSON_GetObjectItem(j, "front_deg");
+                cJSON *sm = cJSON_GetObjectItem(j, "stop_mm");
+                if (cJSON_IsNumber(fd)) autonomy_set_lid_front_deg((int)fd->valuedouble);
+                if (cJSON_IsNumber(sm)) autonomy_set_front_stop_mm((int)sm->valuedouble);
+                cJSON_Delete(j);
+            }
+        }
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "lid_front_deg", autonomy_get_lid_front_deg());
+    cJSON_AddNumberToObject(root, "front_stop_mm", autonomy_get_front_stop_mm());
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, out);
+    free(out);
+    return ESP_OK;
+}
+
 /* POST /api/hall/threshold {"threshold_v":N} - ustawia próg detekcji mety
  * czujnikiem Halla: maksymalną odchyłkę napięcia SS495A od wartości
  * spoczynkowej (HALL_FINISH_REST_V), przy której meldowana jest meta.
@@ -1041,6 +1121,36 @@ static esp_err_t handle_hall_threshold(httpd_req_t *req) {
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "finish_threshold_v", (double)ads1115_get_finish_threshold());
+    char *s = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, s);
+    free(s);
+    return ESP_OK;
+}
+
+/* POST /api/hall/manual {"enabled":true/false} - włącza/wyłącza reakcję na
+ * Hall mety podczas jazdy RĘCZNEJ (ton finiszu + zielona dioda + tryb
+ * szukania ciepła w main.c). Nie dotyczy autonomii - tam Hall działa
+ * zawsze. Brak ciała = przełącz stan. Odpowiada aktualnym stanem. */
+static esp_err_t handle_hall_manual(httpd_req_t *req) {
+    bool target = !ads1115_get_hall_manual_enabled();   /* domyślnie: przełącz */
+    if (req->content_len > 0) {
+        char buf[64];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *e = cJSON_GetObjectItem(j, "enabled");
+                if (e) target = cJSON_IsTrue(e) ||
+                                (cJSON_IsNumber(e) && e->valuedouble != 0);
+                cJSON_Delete(j);
+            }
+        }
+    }
+    ads1115_set_hall_manual_enabled(target);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "manual_enabled", ads1115_get_hall_manual_enabled());
     char *s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
@@ -1136,8 +1246,10 @@ esp_err_t http_server_start(void) {
         { .uri="/api/autonomy",       .method=HTTP_POST, .handler=handle_autonomy   },
         { .uri="/api/autonomy/heading", .method=HTTP_POST, .handler=handle_autonomy_heading },
         { .uri="/api/autonomy/speed",   .method=HTTP_POST, .handler=handle_autonomy_speed },
+        { .uri="/api/autonomy/lidar",   .method=HTTP_POST, .handler=handle_autonomy_lidar },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
         { .uri="/api/hall/threshold",   .method=HTTP_POST, .handler=handle_hall_threshold },
+        { .uri="/api/hall/manual",      .method=HTTP_POST, .handler=handle_hall_manual },
         { .uri="/api/line_test",        .method=HTTP_POST, .handler=handle_line_test },
     };
 

@@ -150,19 +150,21 @@ typedef enum { EDGE_SIDE_UNKNOWN, EDGE_SIDE_LEFT, EDGE_SIDE_RIGHT } edge_side_t;
 #define HEADING_TARGET_DEFAULT   18.0f
 #define HEADING_TARGET_MAX       90.0f  /* zakres przycinania [+/-°] */
 
-/* Bufor logu przejazdu (RAM, do pobrania jako CSV). Rekord ~48 B (Krok 5e:
- * +napiecie/wykrycie Halla); 1100 * 48 ~= 53 KB - wciaz w granicach zapasu
+/* Bufor logu przejazdu (RAM, do pobrania jako CSV). Rekord ~50 B (Krok 5e:
+ * +Hall; Krok 6: +korytarz); 1100 * 50 ~= 55 KB - wciaz w granicach zapasu
  * sterty zmierzonego przy Kroku 1 (~62 KB wolne w segmencie DRAM). Przy
  * 300 ms daje ok. 5,5 min nagrywania. */
 #define AUTO_LOG_MAX   1100
 
-/* --- Krok 1: sektory LIDAR do telemetrii ---
+/* --- Krok 1/6: sektory LIDAR + orientacja glowicy ---
  * LID_MIRROR=1 ustalone w tescie Kroku 1: surowy kat LIDAR rosnie w strone
- * fizycznie PRAWEJ, wiec bez odbicia sektory L/P byly zamienione (karton
- * przod-lewo trafial do sektora przod-prawy). LID_FRONT_DEG (drobny offset
- * obrotu 0 = przod robota) potwierdzony zgrubnie - precyzyjny dobor w Kroku 6. */
-#define LID_FRONT_DEG   0
-#define LID_MIRROR      1
+ * fizycznie PRAWEJ, wiec bez odbicia sektory L/P byly zamienione. Offset
+ * przodu (s_lid_front_deg, 0 = przod robota) jest w Kroku 6 nastawialny z
+ * dashboardu - kalibracja to iteracja z tools/lidar_map.py. LID_MIRROR
+ * zostaje stala (binarne, potwierdzone). */
+#define LID_MIRROR         1
+#define LID_FRONT_DEG_DEF  0     /* domyslny offset przodu [st] */
+static volatile int s_lid_front_deg = LID_FRONT_DEG_DEF;
 
 enum { SEC_FRONT, SEC_FRONT_L, SEC_LEFT, SEC_REAR_L,
        SEC_REAR,  SEC_REAR_R,  SEC_RIGHT, SEC_FRONT_R, SEC_COUNT };
@@ -172,9 +174,47 @@ static const int s_sec_half[SEC_COUNT]   = { 15,  20,  20,  20,  15,   20,  20, 
 /* Min. odleglosc [mm] w luku wzgledem przodu robota; 0 = brak echa (otwarte). */
 static uint16_t lidar_arc_mm(int rel_center, int half) {
     int s = LID_MIRROR ? -1 : 1;
-    int c = (LID_FRONT_DEG + s * rel_center) % 360;
+    int c = (s_lid_front_deg + s * rel_center) % 360;
     if (c < 0) c += 360;
     return lidar_min_in_arc(c, half);
+}
+
+/* --- Krok 6: kontrola korytarza przed przeszkoda (LIDAR) ---
+ * W ST_CRUISE, przed regulatorem kursu: jesli korytarz na szerokosc robota
+ * na wprost jest zablokowany blizej niz s_front_stop_mm -> STOP (na razie
+ * TYLKO zatrzymanie, bez omijania - to Krok 7). Auto-wznowienie, gdy
+ * korytarz sie oczysci. Sprawdzamy min. odleglosc na 3 promieniach: srodek
+ * + obie krawedzie pojazdu (kat krawedzi liczony geometrycznie z polowy
+ * szerokosci + zapasu), zeby lapac tez przeszkody nie idealnie centralne.
+ * Prog s_front_stop_mm nastawialny z dashboardu. */
+#define VEHICLE_WIDTH_MM        250
+#define CORRIDOR_MARGIN_MM       40    /* zapas po kazdej stronie [mm] */
+#define CORRIDOR_HALF_MM        (VEHICLE_WIDTH_MM / 2 + CORRIDOR_MARGIN_MM)
+#define CORRIDOR_RAY_HALF_DEG    5     /* polowa luku pojedynczego promienia */
+#define D_OPEN_MM             4000     /* brak echa => tak daleko (kierunek otwarty) */
+#define FRONT_STOP_MM_DEF      450     /* domyslny prog zatrzymania [mm] */
+#define FRONT_STOP_MM_MIN     150
+#define FRONT_STOP_MM_MAX    1500
+#define OBSTACLE_DEBOUNCE_COUNT 3      /* takty petli, jak przy linii */
+#define DEG_TO_RAD_F          0.017453292f
+
+static volatile int s_front_stop_mm  = FRONT_STOP_MM_DEF;
+static volatile int s_corridor_mm    = D_OPEN_MM;   /* ostatnio policzony min. korytarza (telemetria) */
+
+static inline int open_mm(uint16_t v) { return v == 0 ? D_OPEN_MM : (int)v; }
+
+/* Min. odleglosc [mm] w korytarzu na wprost przy zadanym lookahead:
+ * srodek + obie krawedzie pojazdu (kat krawedzi = atan(polowa_szer/lookahead)). */
+static int corridor_min_mm(int lookahead_mm) {
+    if (lookahead_mm < 50) lookahead_mm = 50;
+    float edge_rad = atanf((float)CORRIDOR_HALF_MM / (float)lookahead_mm);
+    int   edge_deg = (int)(edge_rad / DEG_TO_RAD_F + 0.5f);
+    int m = open_mm(lidar_arc_mm(0,          CORRIDOR_RAY_HALF_DEG));
+    int l = open_mm(lidar_arc_mm(+edge_deg,  CORRIDOR_RAY_HALF_DEG));
+    int r = open_mm(lidar_arc_mm(-edge_deg,  CORRIDOR_RAY_HALF_DEG));
+    if (l < m) m = l;
+    if (r < m) m = r;
+    return m;
 }
 
 /* Stany maszyny sterujacej. */
@@ -182,6 +222,7 @@ typedef enum {
     ST_IDLE,          /* wylaczony / bezczynny */
     ST_GYRO_CAL,      /* start przejazdu - bezruch, usrednianie biasu gyro_z (Krok 2) */
     ST_CRUISE,        /* jazda na wprost */
+    ST_OBSTACLE,      /* przeszkoda w korytarzu - STOP, czeka na oczyszczenie (Krok 6) */
     ST_LINE_WAIT,     /* linia wykryta - postoj i oczekiwanie na potwierdzenie mety Hallem */
     ST_LINE_BACKUP,   /* to nie meta - cofanie */
     ST_LINE_PAUSE,    /* krotki postoj po cofnieciu, przed ponowna proba jazdy */
@@ -206,6 +247,10 @@ static edge_side_t s_line_hit_side = EDGE_SIDE_UNKNOWN;
 /* Krok 5d: liczniki debounce (patrz LINE_DEBOUNCE_COUNT/HALL_DEBOUNCE_COUNT). */
 static int s_line_debounce = 0;
 static int s_hall_debounce = 0;
+
+/* Krok 6: liczniki debounce dla wykrycia/oczyszczenia przeszkody w korytarzu. */
+static int s_obst_block_count = 0;
+static int s_obst_clear_count = 0;
 
 /* Moc silnikow [%] przy jezdzie na wprost/do tylu - ustawiana z
  * dashboardu (patrz autonomy_set_speed_pct()). */
@@ -252,6 +297,7 @@ static const char *state_name(st_t s) {
         case ST_IDLE:        return "Bezczynny";
         case ST_GYRO_CAL:    return "Kalibracja zyroskopu";
         case ST_CRUISE:      return "Jazda";
+        case ST_OBSTACLE:    return "Przeszkoda (stop)";
         case ST_LINE_WAIT:   return "Linia - sprawdzam mete";
         case ST_LINE_BACKUP: return "Cofanie (nie meta)";
         case ST_LINE_PAUSE:  return "Postoj po cofnieciu";
@@ -288,6 +334,7 @@ typedef struct {
     line_sensor_data_t line;
     ads1115_data_t      hall;      /* Krok 5e: A0 (Hall mety) + finish_detected */
     int16_t            sec_mm[SEC_COUNT];
+    int16_t            corridor_mm; /* Krok 6: min. korytarza na wprost [mm] */
     float              heading_deg;
     float              gyro_z_filt;
 } telem_t;
@@ -299,6 +346,7 @@ static telem_t telem_snapshot(void) {
     t.hall = ads1115_get_last();
     for (int i = 0; i < SEC_COUNT; i++)
         t.sec_mm[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
+    t.corridor_mm = (int16_t)corridor_min_mm(s_front_stop_mm);
     t.heading_deg = s_heading_deg;
     t.gyro_z_filt = s_gyro_z_filt;
     return t;
@@ -326,6 +374,7 @@ static void record_sample(uint32_t now, pyrometer_data_t pd, const telem_t *tl) 
     r->gyro_bias_x10 = (int16_t)(s_gyro_bias * 10.0f);
     r->heading_x10  = (int16_t)(tl->heading_deg * 10.0f);
     for (int i = 0; i < SEC_COUNT; i++) r->lidar_mm[i] = tl->sec_mm[i];
+    r->corridor_mm  = tl->corridor_mm;
     r->line_fl_mv   = (int16_t)(tl->line.front_left_v * 1000.0f);
     r->line_bl_mv   = (int16_t)(tl->line.back_left_v  * 1000.0f);
     r->line_br_mv   = (int16_t)(tl->line.back_right_v * 1000.0f);
@@ -375,6 +424,8 @@ static void start_gyro_cal(void) {
     s_line_hit_side = EDGE_SIDE_UNKNOWN;
     s_line_debounce = 0;
     s_hall_debounce = 0;
+    s_obst_block_count = 0;
+    s_obst_clear_count = 0;
     enter(ST_GYRO_CAL);
 }
 
@@ -442,11 +493,12 @@ static void autonomy_task(void *arg) {
             telem_t tl = telem_snapshot();
             ESP_LOGI(TAG,
                 "[%s] L=%d%% R=%d%% | kurs=%.1f cel=%.1f err=%.1f | gyroZ raw/filt=%.1f/%.1f bias=%.2f /s | "
-                "LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
+                "korytarz=%d/prog=%d mm | LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
                 "linia PL/TL/TP=%d/%d/%d mV | Hall=%.3fV wykryto=%d",
                 state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
                 tl.heading_deg, s_heading_target_deg, heading_err(),
                 tl.imu.gyro_z, tl.gyro_z_filt, s_gyro_bias,
+                tl.corridor_mm, s_front_stop_mm,
                 tl.sec_mm[SEC_FRONT], tl.sec_mm[SEC_FRONT_L], tl.sec_mm[SEC_LEFT],
                 tl.sec_mm[SEC_REAR_L], tl.sec_mm[SEC_REAR], tl.sec_mm[SEC_REAR_R],
                 tl.sec_mm[SEC_RIGHT], tl.sec_mm[SEC_FRONT_R],
@@ -555,6 +607,30 @@ static void autonomy_task(void *arg) {
                     break;
                 }
             }
+
+            /* Krok 6: kontrola korytarza przed przeszkoda. Aktywna ZAWSZE
+             * (nie ma wyjatku startowego jak przy tasmie - przeszkoda to
+             * przeszkoda). Debounce jak przy linii - LIDAR na pojedynczym
+             * sektorze potrafi skoczyc. Na razie tylko STOP, bez omijania. */
+            {
+                int cmin = corridor_min_mm(s_front_stop_mm);
+                s_corridor_mm = cmin;
+                if (cmin < s_front_stop_mm) {
+                    s_obst_block_count++;
+                } else {
+                    s_obst_block_count = 0;
+                }
+                if (s_obst_block_count >= OBSTACLE_DEBOUNCE_COUNT) {
+                    s_obst_block_count = 0;
+                    s_obst_clear_count = 0;
+                    ESP_LOGI(TAG, "Przeszkoda w korytarzu (%d mm < prog %d mm) - STOP.",
+                             cmin, s_front_stop_mm);
+                    motor_stop();
+                    enter(ST_OBSTACLE);
+                    break;
+                }
+            }
+
             /* Krok 3: jazda z utrzymaniem zadanego kursu regulatorem P.
              * turn>0 => skret w lewo (lewe kolo wolniej, prawe szybciej).
              * motor_set_* przycina do [-100,100] we wlasnym zakresie. */
@@ -574,6 +650,29 @@ static void autonomy_task(void *arg) {
                 int td = (int)lroundf(turn);   /* zaokraglenie, nie obciecie - unika martwej strefy +/-1% */
                 motor_set_left (s_speed_pct - td);
                 motor_set_right(s_speed_pct + td);
+            }
+            break;
+
+        case ST_OBSTACLE:
+            /* Krok 6: STOP przed przeszkoda. Auto-wznowienie, gdy korytarz
+             * sie oczysci (debounce, zeby nie migotalo na szumie LIDAR).
+             * Omijanie dojdzie w Kroku 7 - tu pojazd po prostu czeka. */
+            motor_stop();
+            {
+                int cmin = corridor_min_mm(s_front_stop_mm);
+                s_corridor_mm = cmin;
+                if (cmin >= s_front_stop_mm) {
+                    s_obst_clear_count++;
+                } else {
+                    s_obst_clear_count = 0;
+                }
+                if (s_obst_clear_count >= OBSTACLE_DEBOUNCE_COUNT) {
+                    s_obst_clear_count = 0;
+                    s_obst_block_count = 0;
+                    ESP_LOGI(TAG, "Korytarz oczyszczony (%d mm >= prog %d mm) - jade dalej.",
+                             cmin, s_front_stop_mm);
+                    enter(ST_CRUISE);
+                }
             }
             break;
 
@@ -702,6 +801,25 @@ void autonomy_set_heading_target_deg(float deg) {
 void autonomy_get_lidar_sectors_mm(int16_t out[8]) {
     for (int i = 0; i < SEC_COUNT; i++)
         out[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
+}
+
+/* --- Krok 6: kalibracja/parametry LIDAR (nastawialne z dashboardu). --- */
+int autonomy_get_lid_front_deg(void)  { return s_lid_front_deg; }
+int autonomy_get_front_stop_mm(void)  { return s_front_stop_mm; }
+int autonomy_get_corridor_mm(void)    { return s_corridor_mm; }
+
+void autonomy_set_lid_front_deg(int deg) {
+    deg %= 360;
+    if (deg < 0) deg += 360;
+    s_lid_front_deg = deg;
+    ESP_LOGI(TAG, "Offset przodu LIDAR = %d st.", deg);
+}
+
+void autonomy_set_front_stop_mm(int mm) {
+    if (mm < FRONT_STOP_MM_MIN) mm = FRONT_STOP_MM_MIN;
+    if (mm > FRONT_STOP_MM_MAX) mm = FRONT_STOP_MM_MAX;
+    s_front_stop_mm = mm;
+    ESP_LOGI(TAG, "Prog STOP przed przeszkoda = %d mm.", mm);
 }
 
 void autonomy_set_speed_pct(int pct) {

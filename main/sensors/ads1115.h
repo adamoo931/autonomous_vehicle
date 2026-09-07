@@ -64,3 +64,11 @@ float ads1115_get_finish_threshold(void);
  * Przycinana do ±0,5 V wokół HALL_FINISH_REST_V. Nie zapisywana w NVS. */
 void  ads1115_set_finish_rest_v(float volts);
 float ads1115_get_finish_rest_v(void);
+
+/* Reakcja na Hall mety podczas jazdy RĘCZNEJ (ton finiszu + zielona dioda
+ * + tryb szukania ciepła pirometrem w main.c). Domyślnie włączona; można
+ * wyłączyć z dashboardu, żeby nie zakłócała testów jazdy ręcznej. NIE dotyczy
+ * trybu autonomicznego - tam Hall działa zawsze (autonomy.c ma własną,
+ * bramkowaną obsługę). Nie zapisywana w NVS. */
+void  ads1115_set_hall_manual_enabled(bool enabled);
+bool  ads1115_get_hall_manual_enabled(void);

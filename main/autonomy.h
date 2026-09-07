@@ -69,9 +69,19 @@ void  autonomy_set_heading_target_deg(float deg);
 
 /* Kopiuje 8 minimalnych odległości sektorowych LIDAR [mm] do out[8]
  * (0 = brak echa / kierunek otwarty). Kolejność: przód, przód-L, lewo,
- * tył-L, tył, tył-P, prawo, przód-P (patrz enum SEC_* w autonomy.c).
- * Kalibracja przodu LIDAR dojdzie w Kroku 6 - na razie 0° = surowy przód. */
+ * tył-L, tył, tył-P, prawo, przód-P (patrz enum SEC_* w autonomy.c). */
 void autonomy_get_lidar_sectors_mm(int16_t out[8]);
+
+/* --- Krok 6: kalibracja/parametry kontroli korytarza (LIDAR), nastawiane
+ * z dashboardu (POST /api/autonomy/lidar). front_deg = offset przodu głowicy
+ * LIDAR [°], dobierany narzędziem tools/lidar_map.py; front_stop_mm = próg
+ * zatrzymania przed przeszkodą [mm], przycinany do [150,1500]. corridor_mm =
+ * ostatnio policzona min. odległość w korytarzu na wprost (telemetria). */
+int  autonomy_get_lid_front_deg(void);
+void autonomy_set_lid_front_deg(int deg);
+int  autonomy_get_front_stop_mm(void);
+void autonomy_set_front_stop_mm(int mm);
+int  autonomy_get_corridor_mm(void);
 
 /* Moc silników [% mocy, 0..100] przy jeździe na wprost i przy cofaniu
  * (ST_CRUISE/ST_LINE_BACKUP w autonomy.c) - wpisywana z dashboardu.
@@ -113,6 +123,7 @@ typedef struct {
     int16_t  gyro_bias_x10; /* aktualny bias gyro_z [°/s] * 10 - zmienny w czasie (Krok 4b: powolna adaptacja) */
     int16_t  heading_x10;   /* scałkowany kurs względny [°] * 10, zawinięty (-180,180]; po odjęciu biasu (Krok 2) */
     int16_t  lidar_mm[8];   /* min. odległość w 8 sektorach [mm]; 0 = otwarte. Kolejność jak w SEC_* */
+    int16_t  corridor_mm;   /* Krok 6: min. odległość w korytarzu na wprost (3 promienie) [mm] */
     int16_t  line_fl_mv;    /* czujnik linii przód-lewy [mV] */
     int16_t  line_bl_mv;    /* tył-lewy [mV] */
     int16_t  line_br_mv;    /* tył-prawy [mV] */

@@ -87,7 +87,13 @@ static void sensor_task(void *arg) {
          * odczyt/aktualizacja pola na dashboardzie dzieje się już w
          * http_server przy każdym /api/sensors. */
         bool is_finish = hall.finish_detected;
-        if (is_finish && !was_finish) {
+        /* W trybie RĘCZNYM reakcję na Hall (ton + zielona dioda + tryb
+         * szukania ciepła) można wyłączyć z dashboardu - nie zakłóca testów
+         * jazdy ręcznej. W autonomii Hall działa zawsze (autonomy.c ma
+         * własną, bramkowaną obsługę mety). was_finish aktualizujemy zawsze,
+         * żeby po ponownym włączeniu nie odpalić na wciąż trzymanym zboczu. */
+        bool hall_react = auto_on || ads1115_get_hall_manual_enabled();
+        if (hall_react && is_finish && !was_finish) {
             buzzer_play_finish_tone();
             finish_latch = true;
             led_set_green(true);
