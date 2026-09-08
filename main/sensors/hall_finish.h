@@ -29,6 +29,17 @@ int hall_finish_do_raw(void);
  * hall_finish_set_active_low(). */
 bool hall_finish_detected(void);
 
+/* Zatrzask impulsu DO. Moduł cyfrowy 49E+LM393 daje KRÓTKI impuls DO w chwili
+ * przejeżdżania nad magnesem (czasem < czas debounce), a gdy pojazd staje na
+ * taśmie - często już za magnesem, DO wraca do spoczynku. hall_finish_poll()
+ * (wołane co takt pętli autonomii) znaczy czas ostatniej aktywności DO;
+ * hall_finish_seen_recently() mówi, czy impuls był w ciągu ostatnich
+ * within_ms - dzięki temu meta jest wykrywana mimo krótkiego impulsu w ruchu.
+ * hall_finish_clear_latch() kasuje zatrzask (na starcie przejazdu). */
+void hall_finish_poll(unsigned int now_ms);
+bool hall_finish_seen_recently(unsigned int now_ms, unsigned int within_ms);
+void hall_finish_clear_latch(void);
+
 /* Polaryzacja: true = "meta" gdy DO w stanie LOW (typowe moduły LM393),
  * false = gdy DO w stanie HIGH. Ustawiane z dashboardu; nie zapisywane w NVS. */
 void hall_finish_set_active_low(bool active_low);

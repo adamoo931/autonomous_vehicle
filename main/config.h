@@ -49,7 +49,7 @@
  * jednocześnie ~0,4-0,6 V poniżej najniższej płytki. */
 #define LINE_FR_THRESHOLD_V   1.05f  /* A0 — przód-prawy (taśma ~0,36; płytki >=1,62) */
 #define LINE_FL_THRESHOLD_V   0.8f  /* A1 — przód-lewy  (taśma ~0,24; płytki >=1,65) */
-#define LINE_BL_THRESHOLD_V   2.20f  /* A2 — tył-lewy    (taśma ~1,62; płytki >=2,62) */
+#define LINE_BL_THRESHOLD_V   2.0f  /* A2 — tył-lewy    (taśma ~1,62; płytki >=2,62) */
 #define LINE_BR_THRESHOLD_V   0.90f  /* A3 — tył-prawy   (taśma ~0,20; płytki >=1,38) */
 
 /* ============================================================

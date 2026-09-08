@@ -211,6 +211,12 @@ static const char DASHBOARD_HTML[] =
     "    <input type=\"number\" id=\"auto-passms-in\" min=\"500\" max=\"6000\" step=\"100\" value=\"2500\" style=\"width:80px\"><span>ms</span>\n"
     "    <button onclick=\"setLidar()\">Zapisz</button>\n"
     "  </div>\n"
+    "  <div style=\"display:flex;gap:8px;align-items:center;margin-top:8px;flex-wrap:wrap\">\n"
+    "    <label>G&#243;rna kraw&#281;d&#378; &#8211; pr&#243;g czasu jazdy naprz&#243;d:</label>\n"
+    "    <input type=\"number\" id=\"auto-travms-in\" min=\"5000\" max=\"180000\" step=\"1000\" value=\"25000\" style=\"width:90px\"><span>ms</span>\n"
+    "    <button onclick=\"setLidar()\">Zapisz</button>\n"
+    "    <span style=\"font-size:0.85em;color:#8b949e\">jazda naprz&#243;d: <span class=\"val\" id=\"auto-fwdms\">-</span> ms</span>\n"
+    "  </div>\n"
     "  <div style=\"font-size:0.82em;color:#8b949e;margin-top:6px;font-family:monospace\">\n"
     "    kurs: <span class=\"val\" id=\"auto-heading\">-</span>&#176; / cel <span class=\"val\" id=\"auto-htgt\">-</span>&#176; &nbsp; "
     "gyro_z raw/filt: <span class=\"val\" id=\"auto-gyroz\">-</span>&#176;/s &nbsp; "
@@ -392,6 +398,11 @@ static const char DASHBOARD_HTML[] =
     "          var pmi=document.getElementById('auto-passms-in');\n"
     "          if(document.activeElement!==pmi && !pmi.dataset.touched){pmi.value=d.autonomy.avoid_pass_ms;}\n"
     "        }\n"
+    "        if(typeof d.autonomy.forward_ms!=='undefined'){\n"
+    "          document.getElementById('auto-fwdms').textContent=d.autonomy.forward_ms;\n"
+    "          var tmi=document.getElementById('auto-travms-in');\n"
+    "          if(document.activeElement!==tmi && !tmi.dataset.touched){tmi.value=d.autonomy.traverse_ms;}\n"
+    "        }\n"
     "      }\n"
     "    }\n"
     "    if(d.line_test){\n"
@@ -438,16 +449,19 @@ static const char DASHBOARD_HTML[] =
     "document.getElementById('auto-stopmm-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "document.getElementById('auto-scandeg-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "document.getElementById('auto-passms-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
+    "document.getElementById('auto-travms-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
     "function setLidar(){\n"
     "  var fd=parseInt(document.getElementById('auto-lidfront-in').value);\n"
     "  var sm=parseInt(document.getElementById('auto-stopmm-in').value);\n"
     "  var sd=parseInt(document.getElementById('auto-scandeg-in').value);\n"
     "  var pm=parseInt(document.getElementById('auto-passms-in').value);\n"
+    "  var tm=parseInt(document.getElementById('auto-travms-in').value);\n"
     "  var body={};\n"
     "  if(!isNaN(fd))body.front_deg=fd;\n"
     "  if(!isNaN(sm))body.stop_mm=sm;\n"
     "  if(!isNaN(sd))body.scan_deg=sd;\n"
     "  if(!isNaN(pm))body.pass_ms=pm;\n"
+    "  if(!isNaN(tm))body.traverse_ms=tm;\n"
     "  fetch('/api/autonomy/lidar',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})\n"
     "    .then(function(r){return r.json();})\n"
     "    .then(function(d){\n"
@@ -455,8 +469,10 @@ static const char DASHBOARD_HTML[] =
     "      var smi=document.getElementById('auto-stopmm-in');delete smi.dataset.touched;\n"
     "      var sdi=document.getElementById('auto-scandeg-in');delete sdi.dataset.touched;\n"
     "      var pmi=document.getElementById('auto-passms-in');delete pmi.dataset.touched;\n"
+    "      var tmi=document.getElementById('auto-travms-in');delete tmi.dataset.touched;\n"
     "      if(d&&typeof d.lid_front_deg!=='undefined'){lfi.value=d.lid_front_deg;smi.value=d.front_stop_mm;}\n"
     "      if(d&&typeof d.scan_deg!=='undefined'){sdi.value=d.scan_deg;pmi.value=d.pass_ms;}\n"
+    "      if(d&&typeof d.traverse_ms!=='undefined'){tmi.value=d.traverse_ms;}\n"
     "    }).catch(function(){});\n"
     "}\n"
     "function setHallActiveLow(){\n"
@@ -703,6 +719,9 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     /* Krok 7: parametry omijania (follow-the-gap). */
     cJSON_AddNumberToObject(autoj, "scan_max_deg",  autonomy_get_scan_max_deg());
     cJSON_AddNumberToObject(autoj, "avoid_pass_ms", autonomy_get_avoid_pass_ms());
+    /* Krok 9: przejscie faza 1->2 (gorna krawedz toru). */
+    cJSON_AddNumberToObject(autoj, "forward_ms",    autonomy_get_forward_ms());
+    cJSON_AddNumberToObject(autoj, "traverse_ms",   autonomy_get_traverse_ms());
     {
         int16_t secs[8];
         autonomy_get_lidar_sectors_mm(secs);
@@ -1085,10 +1104,12 @@ static esp_err_t handle_autonomy_lidar(httpd_req_t *req) {
                 cJSON *sm = cJSON_GetObjectItem(j, "stop_mm");
                 cJSON *sd = cJSON_GetObjectItem(j, "scan_deg");
                 cJSON *pm = cJSON_GetObjectItem(j, "pass_ms");
+                cJSON *tm = cJSON_GetObjectItem(j, "traverse_ms");
                 if (cJSON_IsNumber(fd)) autonomy_set_lid_front_deg((int)fd->valuedouble);
                 if (cJSON_IsNumber(sm)) autonomy_set_front_stop_mm((int)sm->valuedouble);
                 if (cJSON_IsNumber(sd)) autonomy_set_scan_max_deg((int)sd->valuedouble);
                 if (cJSON_IsNumber(pm)) autonomy_set_avoid_pass_ms((int)pm->valuedouble);
+                if (cJSON_IsNumber(tm)) autonomy_set_traverse_ms((int)tm->valuedouble);
                 cJSON_Delete(j);
             }
         }
@@ -1098,6 +1119,7 @@ static esp_err_t handle_autonomy_lidar(httpd_req_t *req) {
     cJSON_AddNumberToObject(root, "front_stop_mm", autonomy_get_front_stop_mm());
     cJSON_AddNumberToObject(root, "scan_deg",      autonomy_get_scan_max_deg());
     cJSON_AddNumberToObject(root, "pass_ms",       autonomy_get_avoid_pass_ms());
+    cJSON_AddNumberToObject(root, "traverse_ms",   autonomy_get_traverse_ms());
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");

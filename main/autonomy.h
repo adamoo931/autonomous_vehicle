@@ -100,6 +100,16 @@ void autonomy_set_scan_max_deg(int deg);
 int  autonomy_get_avoid_pass_ms(void);
 void autonomy_set_avoid_pass_ms(int ms);
 
+/* --- Krok 9: wykrycie dalekiej (górnej) krawędzi toru = przejście faza 1->2.
+ * forward_ms = skumulowany czas jazdy do przodu w bieżącym przejeździe [ms]
+ * (podgląd, do kalibracji); traverse_ms = próg, po którym kontakt z taśmą
+ * przy zbieżnym kursie jest traktowany jako górna krawędź. Nastawiane z
+ * dashboardu (POST /api/autonomy/lidar, pole traverse_ms), przycinane do
+ * [5000,180000]. Nie zapisywane w NVS. */
+int  autonomy_get_forward_ms(void);
+int  autonomy_get_traverse_ms(void);
+void autonomy_set_traverse_ms(int ms);
+
 /* Moc silników [% mocy, 0..100] przy jeździe na wprost i przy cofaniu
  * (ST_CRUISE/ST_LINE_BACKUP w autonomy.c) - wpisywana z dashboardu.
  * Wartość spoza zakresu jest przycinana. Domyślnie 35% (patrz autonomy.c). */

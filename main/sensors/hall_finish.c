@@ -11,6 +11,9 @@ static bool s_active_low     = (HALL_FINISH_DO_ACTIVE_LOW != 0);
 /* Reakcja na Hall mety w jeździe ręcznej (patrz nagłówek). Domyślnie nie. */
 static bool s_manual_enabled = false;
 
+/* Zatrzask impulsu DO - czas (ms) ostatniej aktywności; 0 = nigdy / skasowany. */
+static unsigned int s_last_active_ms = 0;
+
 void hall_finish_init(void) {
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << PIN_HALL_FINISH_DO),
@@ -37,6 +40,16 @@ bool hall_finish_detected(void) {
     int raw = gpio_get_level(PIN_HALL_FINISH_DO);
     return s_active_low ? (raw == 0) : (raw != 0);
 }
+
+void hall_finish_poll(unsigned int now_ms) {
+    if (hall_finish_detected()) s_last_active_ms = now_ms ? now_ms : 1u;
+}
+
+bool hall_finish_seen_recently(unsigned int now_ms, unsigned int within_ms) {
+    return s_last_active_ms != 0 && (now_ms - s_last_active_ms) < within_ms;
+}
+
+void hall_finish_clear_latch(void) { s_last_active_ms = 0; }
 
 void hall_finish_set_active_low(bool active_low) {
     s_active_low = active_low;

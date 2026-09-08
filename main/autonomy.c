@@ -69,7 +69,10 @@ static const char *TAG = "AUTO";
  * wyznacza granice toru, wiec sama linia nie odroznia mety od zwyklego
  * przeciecia tasmy - robi to dopiero czujnik Halla. */
 #define LINE_WAIT_MS            1500  /* postoj na linii - oczekiwanie na sygnal Hall */
-#define LINE_BACKUP_MS          2000  /* czas cofania, gdy linia to nie meta */
+#define LINE_BACKUP_MS          2000  /* czas cofania, gdy linia to nie meta (kontakt przednim czujnikiem) */
+#define LINE_BACKUP_REAR_MS    3500  /* czas cofania, gdy tasme zlapaly TYLNE czujniki (pojazd wjechal
+                                      * za linie caly - musi cofnac o cala dlugosc + zapas, inaczej
+                                      * zostaje poza torem i przy nastepnej probie znow lapie ja tylem) */
 #define LINE_POSTBACKUP_PAUSE_MS 500  /* postoj po cofnieciu, zanim pojazd znow ruszy */
 
 /* Linia startowa jest tez oznaczona tasma odblaciowa, przez ktora pojazd
@@ -87,9 +90,6 @@ static const char *TAG = "AUTO";
  * udzialem przod-lewy (jedyny dzialajacy czujnik z przodu) sa geometrycznie
  * niejednoznaczne - traktowane jako nieznane, bez korekty kierunku. */
 typedef enum { EDGE_SIDE_UNKNOWN, EDGE_SIDE_LEFT, EDGE_SIDE_RIGHT } edge_side_t;
-
-#define EDGE_TURN_AWAY_DEG      20.0f  /* dodatkowe "wycelowanie" kursu od strony
-                                         * trafionej krawedzi po odbiciu (patrz Krok 5b) */
 
 /* Krok 5d: debounce detekcji linii i Halla - N kolejnych taktow petli (20 Hz)
  * z warunkiem prawdziwym, zanim uznamy go za realny. Zdiagnozowane logiem
@@ -276,8 +276,10 @@ static int corridor_min_mm(int lookahead_mm) { return corridor_min_at(0, lookahe
                                         * obrana obowiazuje do konca epizodu), ale wciaz mozliwe
                                         * przejscie na 2. strone, gdy na obranej nie ma NIC. */
 #define AVOID_TURN_TOL_DEG        6.0f /* dopuszczalny blad kursu po obrocie */
-#define AVOID_TURN_PCT           45    /* Krok 7b: 50 -> 45 - wolniejszy obrot (mniejszy blad zyra),
-                                        * ale wciaz z zapasem momentu na czysty obrot w miejscu */
+#define AVOID_TURN_PCT           50    /* Krok 8d: moc obrotu w miejscu (PWM %). 50 -> 45 (7b, mniejszy
+                                        * blad zyra) -> 35 (za slabo, naped nie wyrabial ze skretem
+                                        * skid-steer w miejscu) -> 50. Lekko mocniej niz 45, zeby
+                                        * pewnie ruszal robota z miejsca (ST_AVOID_TURN, ST_TRAP_TURN). */
 #define AVOID_TURN_MAX_MS      4500    /* limit czasu obrotu - inaczej STOP */
 #define AVOID_SETTLE_MS         300    /* Krok 7b: bezruch po obrocie, przed przejazdem */
 #define AVOID_SETTLE_MIN_DEG    25     /* Krok 7b: ponizej tego obrotu nie ma po co ustalac
@@ -301,6 +303,37 @@ static int          s_avoid_last_side = 0;        /* Krok 7b: strona ostatniego 
 static bool         s_avoid_turn_big = false;     /* Krok 7b: czy obrot wymaga fazy ustalania kursu */
 static bool         s_avoid_creep = false;        /* Krok 7d: biezacy przejazd w trybie "creep" (wolno) */
 static uint32_t     s_avoid_recovery_until = 0;   /* Krok 7b: ms, do kiedy ograniczony skret w ST_CRUISE */
+
+/* Krok 8b: weto strony obejscia po kontakcie z tasma w trakcie omijania -
+ * kolejny skan szczelin (gdy korytarz sie zablokuje) omija te strone.
+ * Ustawiane przez avoid_note_line_veto(), kasowane po udanym ominieciu /
+ * TTL / kalibracji. */
+#define AVOID_VETO_TTL_MS        8000
+#define AVOID_VETO_MIN_TURN_DEG    20   /* Krok 8b: min. odchylenie od przodu przy wecie */
+#define AVOID_VETO_MAX_TURN_DEG    45   /* Krok 8b: max - wiekszy skret = robot zaklinowany */
+static int      s_avoid_veto_side  = 0;   /* -1 = nie w prawo, +1 = nie w lewo, 0 = brak weta */
+static uint32_t s_avoid_veto_until = 0;
+
+/* Krok 8c/8e: ODBICIE od granicy toru. W chwili kontaktu zapisujemy
+ * s_edge_hit_err = heading_err_of(cel) = (cel - kurs) - przyblizony kat
+ * natarcia na tasme - ORAZ s_line_hit_side (ktory czujnik dotknal).
+ * Po cofnieciu ustawiamy chwilowy (EDGE_BOUNCE_MS) offset CELU regulatora
+ * w ST_CRUISE:
+ *   - KIERUNEK z s_line_hit_side (tasma z prawej -> cel w lewo i odwrotnie).
+ *     NIE ze znaku s_edge_hit_err - estymator po serii duzych obrotow
+ *     omijania miewa zly znak i dawne odbicie potrafilo skrecic W tasme
+ *     (test_34). Czujnik linii jest w tej sprawie pewniejszy.
+ *   - WIELKOSC = |s_edge_hit_err| ograniczona do [EDGE_BOUNCE_MIN_DEG,
+ *     EDGE_BOUNCE_MAX_DEG]: stromszy wjazd => wieksze odbicie.
+ * Estymatora NIE re-zerujemy - re-zerowanie do celu przy skosnym wjezdzie
+ * "zapisywalo" skos w estymatorze (test_33: realny kurs ~45 st, estymator
+ * ~0). Estymator zostaje, tasma go tylko odbija. */
+#define EDGE_BOUNCE_MS           4000
+#define EDGE_BOUNCE_MAX_DEG      40.0f  /* max obrot odbicia OD tasmy, wzgl. biezacego kursu */
+#define EDGE_BOUNCE_MIN_DEG      18.0f  /* min - nawet przy niemal prostopadlym wjezdzie */
+static float    s_edge_bounce_deg   = 0.0f;   /* chwilowy offset celu regulatora [°] */
+static uint32_t s_edge_bounce_until = 0;
+static float    s_edge_hit_err      = 0.0f;   /* kat natarcia na tasme z ostatniego kontaktu [°] */
 
 /* =====================================================================
  *  Krok 8: ucieczka z pulapki (U / L / slepy naroznik)
@@ -337,6 +370,32 @@ static uint32_t     s_avoid_recovery_until = 0;   /* Krok 7b: ms, do kiedy ogran
 static int      s_trap_backups = 0;
 static int      s_trap_escapes = 0;
 
+/* =====================================================================
+ *  Krok 9: wykrycie dalekiej (gornej) krawedzi toru -> przejscie faza 1->2
+ *
+ *  Brak odometrii, zyro zdryfowane, LIDAR za tasma niepewny. Sygnal:
+ *   - s_forward_ms (skumulowany czas jazdy DO PRZODU: ST_CRUISE + omijanie +
+ *     wyjscie z pulapki) >= s_traverse_ms (nastawiane z dashboardu, dostrajane
+ *     w polu), ORAZ
+ *   - kontakt z tasma (jestesmy w ST_LINE_WAIT, Hall nie potwierdzil mety), ORAZ
+ *   - kurs w chwili kontaktu jest zbiezny z kierunkiem jazdy (|blad kursu| <=
+ *     TOP_EDGE_HEADING_TOL) - prostopadle wejscie w gorna krawedz; wejscie
+ *     "w bok" (duzy blad) to boczna krawedz -> normalne cofanie.
+ *  Spelnione -> ST_TOP_EDGE. Krok 9 (minimalny): stan zatrzymuje pojazd i
+ *  loguje; sawtooth w lewo wzdluz krawedzi to Krok 10. Hall dalej sprawdzany. */
+#define TRAVERSE_MS_DEF      25000
+#define TRAVERSE_MS_MIN       5000
+#define TRAVERSE_MS_MAX     180000
+#define TOP_EDGE_HEADING_TOL   15.0f
+
+/* Krok 9b: okno zatrzasku impulsu DO cyfrowego Halla - patrz hall_finish_poll().
+ * Musi pokryc: impuls w ruchu (czasem par set cm przed tasma) -> debounce
+ * linii -> LINE_WAIT_MS -> wejscie w TOP_EDGE. 4 s z zapasem. */
+#define HALL_LATCH_MS         4000
+
+static volatile uint32_t s_traverse_ms = TRAVERSE_MS_DEF;
+static uint32_t          s_forward_ms  = 0;   /* skumulowany czas ruchu do przodu w przejezdzie */
+
 /* Stany maszyny sterujacej. */
 typedef enum {
     ST_IDLE,          /* wylaczony / bezczynny */
@@ -350,6 +409,7 @@ typedef enum {
     ST_TRAP_BACK,     /* Krok 8: brak szczeliny - cofnij sie i skanuj ponownie */
     ST_TRAP_TURN,     /* Krok 8: obrot w miejscu ku najszerszemu otwartemu kierunkowi */
     ST_TRAP_ESCAPE,   /* Krok 8: jazda na wyjscie z pulapki */
+    ST_TOP_EDGE,      /* Krok 9: osiagnieto gorna krawedz toru (faza 2) */
     ST_LINE_WAIT,     /* linia wykryta - postoj i oczekiwanie na potwierdzenie mety Hallem */
     ST_LINE_BACKUP,   /* to nie meta - cofanie */
     ST_LINE_PAUSE,    /* krotki postoj po cofnieciu, przed ponowna proba jazdy */
@@ -370,6 +430,9 @@ static volatile float s_heading_target_deg = HEADING_TARGET_DEFAULT;
 
 /* Krok 5b: strona krawedzi ostatniego kontaktu z tasma (patrz classify_edge_side). */
 static edge_side_t s_line_hit_side = EDGE_SIDE_UNKNOWN;
+/* Krok 8d: czy tasme zlapaly TYLNE czujniki (a nie przednie) - pojazd wjechal
+ * za linie caly korpusem, wiec cofanie musi byc dluzsze (LINE_BACKUP_REAR_MS). */
+static bool s_line_hit_rear = false;
 
 /* Krok 5d: liczniki debounce (patrz LINE_DEBOUNCE_COUNT/HALL_DEBOUNCE_COUNT). */
 static int s_line_debounce = 0;
@@ -428,6 +491,7 @@ static const char *state_name(st_t s) {
         case ST_TRAP_BACK:   return "Pulapka - cofanie";
         case ST_TRAP_TURN:   return "Pulapka - obrot ku wyjsciu";
         case ST_TRAP_ESCAPE: return "Pulapka - wyjscie";
+        case ST_TOP_EDGE:    return "Gorna krawedz toru";
         case ST_LINE_WAIT:   return "Linia - sprawdzam mete";
         case ST_LINE_BACKUP: return "Cofanie (nie meta)";
         case ST_LINE_PAUSE:  return "Postoj po cofnieciu";
@@ -450,8 +514,17 @@ static inline float heading_err_of(float target_deg) {
     return e;
 }
 
-/* Blad wzgledem prawdziwego celu przejazdu (regulator ST_CRUISE). */
-static inline float heading_err(void) { return heading_err_of(s_heading_target_deg); }
+/* Krok 8c: aktywne odchylenie "odbicia" od trafionej granicy toru (0 poza oknem). */
+static inline float edge_bounce_now(void) {
+    if (s_edge_bounce_deg != 0.0f && now_ms() < s_edge_bounce_until) return s_edge_bounce_deg;
+    return 0.0f;
+}
+
+/* Blad wzgledem celu przejazdu (regulator ST_CRUISE), z uwzglednieniem
+ * chwilowego odchylenia odbicia od granicy toru (Krok 8c). */
+static inline float heading_err(void) {
+    return heading_err_of(s_heading_target_deg + edge_bounce_now());
+}
 
 /* Zamraza czas trwania biezacego przejazdu (dashboard ma pokazywac czas
  * do tego momentu, nie licznik biegnacy dalej). Wolane tylko przy
@@ -532,11 +605,15 @@ static inline bool track_line_detected(void) {
     return d.front_left || d.front_right || d.back_left || d.back_right;
 }
 
-/* Krok 5b: patrz definicja EDGE_TURN_AWAY_DEG - klasyfikacja strony
- * krawedzi z wzorca czujnikow linii, ktore zareagowaly. */
+/* Krok 5b/8b: strona krawedzi z wzorca czujnikow linii. Priorytet maja
+ * czujniki PRZEDNIE (A0 przod-P, A1 przod-L - teraz analogowe, wiarygodne),
+ * potem tylne. Jednostronne zadzialanie => ta strona; obustronne / brak =>
+ * nieznana. */
 static edge_side_t classify_edge_side(line_sensor_data_t d) {
-    if (d.back_right && !d.back_left && !d.front_left) return EDGE_SIDE_RIGHT;
-    if (d.back_left  && !d.back_right && !d.front_left) return EDGE_SIDE_LEFT;
+    if (d.front_right && !d.front_left) return EDGE_SIDE_RIGHT;
+    if (d.front_left  && !d.front_right) return EDGE_SIDE_LEFT;
+    if (d.back_right  && !d.back_left)  return EDGE_SIDE_RIGHT;
+    if (d.back_left   && !d.back_right) return EDGE_SIDE_LEFT;
     return EDGE_SIDE_UNKNOWN;
 }
 
@@ -548,9 +625,44 @@ static const char *edge_side_name(edge_side_t s) {
     }
 }
 
+/* Krok 8c v2: wywolywane w chwili PIERWSZEGO potwierdzonego kontaktu z tasma
+ * (przejscie do ST_LINE_WAIT). Zapisuje strone krawedzi ORAZ kat natarcia
+ * (blad kursu wzgl. czystego celu) - obie wartosci uzyte przy odbiciu w
+ * ST_LINE_PAUSE. */
+static void note_line_hit(void) {
+    line_sensor_data_t d = line_sensor_read();
+    s_line_hit_side = classify_edge_side(d);
+    s_edge_hit_err  = heading_err_of(s_heading_target_deg);
+    /* tylko tylne czujniki na tasmie, zadnego przedniego -> pojazd przejechal
+     * linie caly i lapie ja tylem; cofanie musi byc dluzsze */
+    s_line_hit_rear = (d.back_left || d.back_right) && !(d.front_left || d.front_right);
+}
+
+/* Krok 8b: po kontakcie z tasma w trakcie omijania zapamietaj, w ktora
+ * strone szedl manewr - kolejny skan szczelin ma probowac DRUGA strona
+ * (przeszkoda + tasma = litera L: jazda w prawo konczy sie na tasmie, wiec
+ * nastepnym razem obchodzimy z lewej). Priorytet: strona aktywnego manewru
+ * (s_avoid_last_side); jesli brak - asymetria przednich czujnikow linii.
+ * Weto wygasa po AVOID_VETO_TTL_MS albo po udanym ominieciu. */
+static void avoid_note_line_veto(void) {
+    int side = s_avoid_last_side;
+    if (side == 0) {
+        line_sensor_data_t d = line_sensor_read();
+        if      (d.front_right && !d.front_left) side = -1;  /* tasma z przodu-P -> nie w prawo */
+        else if (d.front_left  && !d.front_right) side =  1;  /* tasma z przodu-L -> nie w lewo */
+    }
+    if (side != 0) {
+        s_avoid_veto_side  = side;
+        s_avoid_veto_until = now_ms() + AVOID_VETO_TTL_MS;
+        ESP_LOGI(TAG, "Kontakt z tasma przy omijaniu (manewr szedl w %s) - obejscie z przeciwnej strony.",
+                 side < 0 ? "prawo" : "lewo");
+    }
+}
+
 /* Krok 5d/7: detekcja linii z debounce (wspolna dla ST_CRUISE i stanow
  * omijania). Zwraca true dopiero po LINE_DEBOUNCE_COUNT kolejnych taktach z
- * linia; aktualizuje s_line_debounce (zerowany, gdy linii brak). */
+ * linia; aktualizuje s_line_debounce (zerowany, gdy linii brak). Przy
+ * potwierdzeniu (Krok 8b) zapisuje weto strony obejscia. */
 static bool line_confirmed(void) {
     if (track_line_detected()) {
         s_line_debounce++;
@@ -559,6 +671,7 @@ static bool line_confirmed(void) {
     }
     if (s_line_debounce >= LINE_DEBOUNCE_COUNT) {
         s_line_debounce = 0;
+        avoid_note_line_veto();
         return true;
     }
     return false;
@@ -593,6 +706,22 @@ static bool line_confirmed(void) {
 static int avoid_pick_gap(int need_mm) {
     int need = need_mm;
 
+    /* Krok 8b/8c: weto strony po kontakcie z tasma (litera L). Gdy aktywne -
+     * skanujemy WYLACZNIE bezpieczna strone (przeciwna do tasmy), szukajac
+     * NAJMNIEJSZEGO odchylenia od AVOID_VETO_MIN_TURN_DEG do AVOID_VETO_MAX_TURN_DEG,
+     * ktore ma przeswit (najlagodniejszy skret ktory wyprowadza z rogu - duze
+     * obroty w miejscu rozjezdzaja estymator, patrz test_26). Brak takiego ->
+     * INT_MIN -> eskalacja do cofania (ST_TRAP_*). */
+    bool veto = (s_avoid_veto_side != 0 && now_ms() < s_avoid_veto_until);
+    if (veto) {
+        int safe = -s_avoid_veto_side;   /* +1 = musimy w LEWO, -1 = w PRAWO */
+        for (int mag = AVOID_VETO_MIN_TURN_DEG; mag <= AVOID_VETO_MAX_TURN_DEG; mag += AVOID_SCAN_STEP_DEG) {
+            int rel = (safe > 0) ? mag : -mag;
+            if (corridor_min_at(rel, AVOID_LOOKAHEAD_MM) >= need) return rel;
+        }
+        return INT_MIN;
+    }
+
     /* Krok 7b: wprost wolne -> nie obracaj sie po nic. */
     if (corridor_min_at(0, AVOID_LOOKAHEAD_MM) >= need) return 0;
 
@@ -625,9 +754,15 @@ static int avoid_pick_gap(int need_mm) {
  * Brak echa (open_mm -> D_OPEN_MM) liczy sie jako maksymalnie otwarte, wiec
  * "usta" pulapki (gdzie nie ma sciany) wygrywaja. */
 static int trap_open_dir(int *out_mm) {
+    /* Krok 8b: gdy aktywne weto strony (tasma z boku, litera L), nie kieruj
+     * ucieczki w te strone (LIDAR tasmy nie widzi). */
+    bool veto = (s_avoid_veto_side != 0 && now_ms() < s_avoid_veto_until);
     int best_deg = 0, best_mm = -1;
     for (int d = -180; d < 180; d += TRAP_SWEEP_STEP_DEG) {
         int m = open_mm(lidar_arc_mm(d, TRAP_SWEEP_ARC_HALF));
+        if (veto && ((s_avoid_veto_side > 0 && d >  20 && d <  160) ||
+                     (s_avoid_veto_side < 0 && d < -20 && d > -160)))
+            m -= 3000;
         if (m > best_mm) { best_mm = m; best_deg = d; }
     }
     if (out_mm) *out_mm = best_mm;
@@ -645,6 +780,7 @@ static void start_gyro_cal(void) {
     s_bias_max      = -1e9f;
     s_heading_deg   = 0.0f;
     s_line_hit_side = EDGE_SIDE_UNKNOWN;
+    s_line_hit_rear = false;
     s_line_debounce = 0;
     s_hall_debounce = 0;
     s_obst_block_count = 0;
@@ -653,8 +789,14 @@ static void start_gyro_cal(void) {
     s_avoid_last_side  = 0;
     s_avoid_creep      = false;
     s_avoid_recovery_until = 0;
+    s_avoid_veto_side  = 0;
+    s_edge_bounce_deg  = 0.0f;
+    s_edge_bounce_until = 0;
+    s_edge_hit_err     = 0.0f;
     s_trap_backups     = 0;
     s_trap_escapes     = 0;
+    s_forward_ms       = 0;
+    hall_finish_clear_latch();
     enter(ST_GYRO_CAL);
 }
 
@@ -673,6 +815,10 @@ static void autonomy_task(void *arg) {
     (void)arg;
 
     while (1) {
+        /* Krok 9b: probkuj DO cyfrowego Halla co takt (20 Hz) - zeby zlapac
+         * krotki impuls przy przejezdzaniu nad magnesem, zanim pojazd stanie. */
+        hall_finish_poll(now_ms());
+
         /* --- Krok 2: estymator kursu z zyroskopu - liczony ZAWSZE, takze przy
          * wylaczonej autonomii (obserwowalnosc bez ruszania silnikow).
          * Filtr EMA na predkosc katowa (szum od silnikow), potem calkowanie
@@ -716,6 +862,12 @@ static void autonomy_task(void *arg) {
          * Zakladany krok czasowy to LOOP_MS. */
         s_run_energy_mwh += pw.power_mw * (LOOP_MS / 3600000.0f);
 
+        /* Krok 9: skumulowany czas jazdy DO PRZODU (do wykrycia gornej
+         * krawedzi toru). Liczymy stany, w ktorych pojazd realnie jedzie
+         * naprzod. */
+        if (s_state == ST_CRUISE || s_state == ST_AVOID_PASS || s_state == ST_TRAP_ESCAPE)
+            s_forward_ms += LOOP_MS;
+
         /* Szczegolowy log statusu (konsola) oraz rekord do CSV. */
         if (now - s_log_t >= STATUS_LOG_MS) {
             s_log_t = now;
@@ -745,8 +897,12 @@ static void autonomy_task(void *arg) {
          * zaklocenie (test_13: przy manewrach o duzym poborze pradu odczyt
          * potrafil "plywac"). Bramkowanie oknem kontaktu + debounce odcina te
          * falszywe trafienia. */
-        bool hall_window = (s_state == ST_LINE_WAIT || s_state == ST_LINE_BACKUP || s_state == ST_LINE_PAUSE);
-        if (hall_window && hall_finish_detected()) {
+        bool hall_window = (s_state == ST_LINE_WAIT || s_state == ST_LINE_BACKUP ||
+                            s_state == ST_LINE_PAUSE || s_state == ST_TOP_EDGE);
+        /* Krok 9b: liczy sie DO aktywne TERAZ albo krotki impuls z ostatnich
+         * HALL_LATCH_MS (magnes miniety w ruchu tuz przed zatrzymaniem). */
+        if (hall_window && (hall_finish_detected() ||
+                            hall_finish_seen_recently(now, HALL_LATCH_MS))) {
             /* Krok 5d: debounce - patrz HALL_DEBOUNCE_COUNT. */
             s_hall_debounce++;
         } else {
@@ -816,9 +972,9 @@ static void autonomy_task(void *arg) {
                     /* Krok 5b: zapamietaj, ktory czujnik zareagowal - uzyte przy
                      * powrocie do jazdy (ST_LINE_PAUSE), zeby skrecic OD trafionej
                      * krawedzi zamiast slepo wracac na ten sam kurs. */
-                    s_line_hit_side = classify_edge_side(line_sensor_read());
-                    ESP_LOGI(TAG, "Linia wykryta (strona=%s) - stop, czekam %d ms na potwierdzenie mety (Hall).",
-                             edge_side_name(s_line_hit_side), LINE_WAIT_MS);
+                    note_line_hit();
+                    ESP_LOGI(TAG, "Linia wykryta (strona=%s, kat natarcia %.1f st) - stop, czekam %d ms na potwierdzenie mety (Hall).",
+                             edge_side_name(s_line_hit_side), s_edge_hit_err, LINE_WAIT_MS);
                     motor_stop();
                     enter(ST_LINE_WAIT);
                     break;
@@ -908,6 +1064,7 @@ static void autonomy_task(void *arg) {
                     s_obst_block_count = 0;
                     s_avoid_rescans    = 0;
                     s_avoid_last_side  = 0;
+                    s_avoid_veto_side  = 0;
                     ESP_LOGI(TAG, "Korytarz oczyszczony (%d mm >= prog %d mm) - jade dalej.",
                              cmin, s_front_stop_mm);
                     enter(ST_CRUISE);
@@ -928,7 +1085,7 @@ static void autonomy_task(void *arg) {
              * Linia toru ma priorytet - kontakt przerywa omijanie. */
             motor_stop();
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Omijanie: linia w trakcie skanu (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1023,7 +1180,7 @@ static void autonomy_task(void *arg) {
         case ST_AVOID_TURN: {
             /* Krok 7: obrot w miejscu do kursu szczeliny. */
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Omijanie: linia w trakcie obrotu (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1066,7 +1223,7 @@ static void autonomy_task(void *arg) {
              * sie ustabilizowac. Linia toru dalej priorytetowo. */
             motor_stop();
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Omijanie: linia w trakcie ustalania (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1084,7 +1241,7 @@ static void autonomy_task(void *arg) {
             /* Krok 7: jazda przez szczeline, by REALNIE minac przeszkode.
              * Linia toru ma priorytet; korytarz kontrolowany dalej. */
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Omijanie: linia w trakcie przejazdu (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1118,6 +1275,9 @@ static void autonomy_task(void *arg) {
             if (now - s_state_t >= (uint32_t)s_avoid_pass_ms) {
                 s_avoid_rescans = 0;
                 s_avoid_last_side = 0;
+                s_avoid_veto_side = 0;   /* Krok 8b: przeszkoda ominieta - weto strony nieaktualne */
+                s_edge_bounce_deg = 0.0f;
+                s_edge_bounce_until = 0;
                 /* Krok 7b: lagodny powrot na kurs celu (ograniczony skret przez
                  * AVOID_RECOVERY_MS) - patrz ST_CRUISE. */
                 s_avoid_recovery_until = now + AVOID_RECOVERY_MS;
@@ -1149,7 +1309,7 @@ static void autonomy_task(void *arg) {
             /* Krok 8: cofanie przed ponownym skanem. Linia toru priorytetowo;
              * dodatkowo pilnujemy, zeby nie wcofac sie w cos z tylu. */
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Pulapka: linia w trakcie cofania (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1182,7 +1342,7 @@ static void autonomy_task(void *arg) {
             /* Krok 8: obrot w miejscu ku najszerszemu otwartemu kierunkowi
              * (cel = s_avoid_heading_deg, policzony w ST_AVOID_SCAN). */
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Pulapka: linia w trakcie obrotu (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1216,7 +1376,7 @@ static void autonomy_task(void *arg) {
              * "ust". Kontrola korytarza dalej aktywna - napotkana przeszkoda
              * przelacza w normalne omijanie (ST_AVOID_SCAN). Linia priorytetowo. */
             if (line_confirmed()) {
-                s_line_hit_side = classify_edge_side(line_sensor_read());
+                note_line_hit();
                 ESP_LOGI(TAG, "Pulapka: linia w trakcie wyjscia (strona=%s) - przerywam, test mety.",
                          edge_side_name(s_line_hit_side));
                 motor_stop();
@@ -1273,14 +1433,46 @@ static void autonomy_task(void *arg) {
              * tutaj rozstrzygamy tylko przypadek "Hall nie zadzialal". */
             motor_stop();
             if (now - s_state_t >= LINE_WAIT_MS) {
-                ESP_LOGI(TAG, "Brak sygnalu Hall przez %d ms - to nie meta. Cofam %d ms.",
-                         LINE_WAIT_MS, LINE_BACKUP_MS);
-                enter(ST_LINE_BACKUP);
+                /* Krok 9: czy to gorna krawedz toru? Trzy warunki naraz:
+                 *  1. dosc dlugo jechalismy do przodu (s_forward_ms >= traverse),
+                 *  2. kurs zbiezny z celem (|blad| <= TOP_EDGE_HEADING_TOL) -
+                 *     liczony wzgl. CZYSTEGO celu, bez chwilowego odbicia,
+                 *  3. kontakt PROSTOPADLY: oba przednie czujniki na tasmie ->
+                 *     classify_edge_side == UNKNOWN. Jednostronny kontakt
+                 *     przednim czujnikiem (EDGE_SIDE_LEFT/RIGHT) to muśniecie
+                 *     BOCZNEJ tasmy przy skosie/dryfie - nie gorna krawedz
+                 *     (test_28: kurs pokazywal ~2 st, ale trafil tylko przod-L
+                 *     w boczna tasme i utknal na "gornej krawedzi"). */
+                float top_err = heading_err_of(s_heading_target_deg);
+                bool perp_hit = (s_line_hit_side == EDGE_SIDE_UNKNOWN);
+                if (s_forward_ms >= s_traverse_ms &&
+                    fabsf(top_err) <= TOP_EDGE_HEADING_TOL && perp_hit) {
+                    ESP_LOGI(TAG, "Gorna krawedz toru: jazda naprzod %lu ms (>= %lu), kurs zbiezny "
+                                  "(blad %.1f st), kontakt prostopadly - przechodze w faze 2.",
+                             (unsigned long)s_forward_ms, (unsigned long)s_traverse_ms, top_err);
+                    motor_stop();
+                    enter(ST_TOP_EDGE);
+                } else {
+                    ESP_LOGI(TAG, "Brak sygnalu Hall przez %d ms - to nie meta (naprzod %lu/%lu ms, "
+                                  "blad kursu %.1f st, kontakt=%s). Cofam %d ms.",
+                             LINE_WAIT_MS, (unsigned long)s_forward_ms, (unsigned long)s_traverse_ms,
+                             top_err, perp_hit ? "prostopadly" : "jednostronny (bok)", LINE_BACKUP_MS);
+                    enter(ST_LINE_BACKUP);
+                }
             }
             break;
 
-        case ST_LINE_BACKUP:
-            if (now - s_state_t < LINE_BACKUP_MS) {
+        case ST_TOP_EDGE:
+            /* Krok 9 (minimalny): osiagnieto gorna krawedz toru - pojazd staje.
+             * Meta (Hall) sprawdzana jest dalej w bloku wyzej (hall_window
+             * obejmuje ten stan). Sawtooth w lewo wzdluz krawedzi w poszukiwaniu
+             * magnesu mety to Krok 10. */
+            motor_stop();
+            break;
+
+        case ST_LINE_BACKUP: {
+            uint32_t backup_ms = s_line_hit_rear ? LINE_BACKUP_REAR_MS : LINE_BACKUP_MS;
+            if (now - s_state_t < backup_ms) {
                 motor_set_left(-s_speed_pct);
                 motor_set_right(-s_speed_pct);
             } else {
@@ -1288,43 +1480,53 @@ static void autonomy_task(void *arg) {
                 enter(ST_LINE_PAUSE);
             }
             break;
+        }
 
         case ST_LINE_PAUSE:
             /* Krotki postoj po cofnieciu, zanim pojazd znow ruszy na wprost. */
             motor_stop();
             if (now - s_state_t >= LINE_POSTBACKUP_PAUSE_MS) {
-                /* Krok 5a: re-zerowanie estymatora kursu do zadanej wartosci.
-                 * Diagnoza z dlugich przejazdow (dwa pozornie identyczne
-                 * przejazdy przy tym samym celu - jeden dojechal do mety,
-                 * drugi zniosl w prawo i nie dojechal, mimo ze kurs_deg w obu
-                 * logach wygladal podobnie): regulator zeruje blad w SAMYM
-                 * estymatorze, ale bledy poprzecznego polozenia (calka bledu
-                 * kursu po drodze) nie sa w ogole widoczne w kurs_deg i moga
-                 * sie kumulowac miedzy kontaktami z tasma bez ograniczenia.
-                 * Kontakt z tasma + cofniecie to jedyny dostepny nam moment
-                 * "resetu" - zakladamy, ze pojazd jest z powrotem mniej wiecej
-                 * na kursie i czyscimy nagromadzony blad estymatora.
-                 *
-                 * Krok 5b: dodatkowo, jesli strona kontaktu byla jednoznaczna
-                 * (patrz classify_edge_side - zwalidowane logiem
-                 * przejazdwzdluzlinii.csv), estymator jest re-zerowany NIE
-                 * dokladnie do celu, tylko z odchyleniem "od" trafionej
-                 * krawedzi. Regulator P widzi to jako chwilowy blad kursu i
-                 * sam wykona skret od krawedzi, po czym w naturalny sposob
-                 * wroci do prawdziwego celu w miare jak estymator dogoni
-                 * rzeczywistosc - bez zadnej dodatkowej logiki sterowania.
-                 * Bez tego pojazd wracal w te sama krawedz po ~1,5-2 s (patrz
-                 * log: 3 odbicia pod rzad w ciagu 15 s przy krawedzi po
-                 * prawej). Gdy strona nieznana (np. sam przod-lewy) - bez
-                 * odchylenia, jak w Kroku 5a. */
-                float edge_bias = 0.0f;
-                if      (s_line_hit_side == EDGE_SIDE_RIGHT) edge_bias = -EDGE_TURN_AWAY_DEG; /* estymator "za nisko" -> regulator skreca w lewo, od prawej krawedzi */
-                else if (s_line_hit_side == EDGE_SIDE_LEFT)  edge_bias =  EDGE_TURN_AWAY_DEG; /* odwrotnie - skret w prawo, od lewej krawedzi */
-                ESP_LOGI(TAG, "Postoj po cofnieciu zakonczony - re-zeruje kurs do celu (%.1f°, bylo %.1f°), "
-                              "strona=%s, odchylenie=%.0f° - jade dalej.",
-                         s_heading_target_deg, s_heading_deg, edge_side_name(s_line_hit_side), edge_bias);
-                s_heading_deg   = s_heading_target_deg + edge_bias;
-                s_line_hit_side = EDGE_SIDE_UNKNOWN;
+                /* Krok 8e: ODBICIE od granicy toru - KIERUNEK wylacznie z tego,
+                 * ktory czujnik linii dotknal tasmy (s_line_hit_side), NIE ze
+                 * znaku s_edge_hit_err. Po serii duzych obrotow omijania
+                 * estymator kursu potrafi miec zly ZNAK wzgledem rzeczywistosci
+                 * (test_34 68930 ms: czujnik przod-P na tasmie, a estymator
+                 * pokazuje kurs +19 -> s_edge_hit_err = -19 -> dawne odbicie
+                 * skrecalo w PRAWO, prosto w te sama tasme). Czujnik linii myli
+                 * sie znacznie rzadziej niz zyro.
+                 * WIELKOSC odbicia: |s_edge_hit_err| (przyblizony kat natarcia)
+                 * ograniczone do [MIN, MAX] - stromszy wjazd => wieksze
+                 * odbicie, ale ZAWSZE od tasmy. Estymatora NIE re-zerujemy.
+                 * s_edge_bounce_deg to chwilowy (EDGE_BOUNCE_MS) offset celu
+                 * regulatora w ST_CRUISE. */
+                /* kierunek: +1 = tasma z PRAWEJ (odbij w LEWO), -1 = z LEWEJ (w PRAWO) */
+                int bside = 0;
+                if      (s_line_hit_side == EDGE_SIDE_RIGHT) bside =  1;
+                else if (s_line_hit_side == EDGE_SIDE_LEFT)  bside = -1;
+                else if (s_avoid_veto_side < 0)              bside =  1;   /* weto "nie w prawo" => tasma z prawej */
+                else if (s_avoid_veto_side > 0)              bside = -1;
+                else if (s_edge_hit_err > 0.0f)             bside =  1;    /* strona nieznana - ostatnia deska: znak estymatora */
+                else                                        bside = -1;
+                /* wielkosc: |kat natarcia| w [MIN,MAX] - stromszy wjazd => wieksze odbicie */
+                float mag = fabsf(s_edge_hit_err);
+                if (mag < EDGE_BOUNCE_MIN_DEG) mag = EDGE_BOUNCE_MIN_DEG;
+                if (mag > EDGE_BOUNCE_MAX_DEG) mag = EDGE_BOUNCE_MAX_DEG;
+                /* offset celu liczony WZGLEDEM biezacego kursu (a nie absolutnie):
+                 * -s_edge_hit_err znosi ewentualny bledny bias estymatora, wiec
+                 * realny obrot to dokladnie bside*mag OD tasmy, niezaleznie od
+                 * tego jak bardzo zyro sie rozjechalo. */
+                float refl = -s_edge_hit_err + (float)bside * mag;
+                if (refl >  90.0f) refl =  90.0f;
+                if (refl < -90.0f) refl = -90.0f;
+                s_edge_bounce_deg     = refl;
+                s_edge_bounce_until   = (refl != 0.0f) ? (now + EDGE_BOUNCE_MS) : 0;
+                s_avoid_recovery_until = 0;   /* odbicie ma byc ostre - bez limitu skretu z okna powrotu po omijaniu */
+                ESP_LOGI(TAG, "Postoj po cofnieciu - odbicie od krawedzi %s: |kat natarcia| %.1f st -> offset celu %.1f st na %d ms "
+                              "(kurs %.1f, cel %.1f, BEZ re-zerowania estymatora).",
+                         edge_side_name(s_line_hit_side), fabsf(s_edge_hit_err), refl, EDGE_BOUNCE_MS,
+                         s_heading_deg, s_heading_target_deg);
+                s_line_hit_side       = EDGE_SIDE_UNKNOWN;
+                s_line_hit_rear       = false;
                 enter(ST_CRUISE);
             }
             break;
@@ -1432,6 +1634,17 @@ void autonomy_set_avoid_pass_ms(int ms) {
     if (ms > AVOID_PASS_MS_MAX) ms = AVOID_PASS_MS_MAX;
     s_avoid_pass_ms = ms;
     ESP_LOGI(TAG, "Czas jazdy przez szczeline = %d ms.", ms);
+}
+
+/* --- Krok 9: prog czasu jazdy do przodu dla wykrycia gornej krawedzi toru. --- */
+int autonomy_get_forward_ms(void)  { return (int)s_forward_ms; }
+int autonomy_get_traverse_ms(void) { return (int)s_traverse_ms; }
+
+void autonomy_set_traverse_ms(int ms) {
+    if (ms < TRAVERSE_MS_MIN) ms = TRAVERSE_MS_MIN;
+    if (ms > TRAVERSE_MS_MAX) ms = TRAVERSE_MS_MAX;
+    s_traverse_ms = (uint32_t)ms;
+    ESP_LOGI(TAG, "Prog czasu jazdy do przodu (gorna krawedz) = %d ms.", ms);
 }
 
 void autonomy_set_speed_pct(int pct) {
