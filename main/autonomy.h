@@ -44,6 +44,14 @@ void autonomy_set_enabled(bool enable);
 /* Czy autonomia jest aktualnie aktywna. */
 bool autonomy_is_enabled(void);
 
+/* Czy autonomia potwierdziła metę i zakończyła przejazd (stan
+ * "Zatrzymany (meta)"). Zostaje true po wyłączeniu autonomii, aż do startu
+ * kolejnego przejazdu. sensor_task w main.c reaguje sygnałem mety (buzzer,
+ * pirometr, zielona dioda) na TĘ decyzję - potwierdzoną oknem kontaktu z
+ * taśmą i debounce w autonomy.c - a nie na surowy, podatny na zakłócenia od
+ * silników odczyt czujnika Halla. */
+bool autonomy_finish_reached(void);
+
 /* Krótki opis bieżącego stanu (dla dashboardu), np. "Jazda",
  * "Linia - sprawdzam metę", "Cofanie (nie meta)", "Postój po cofnięciu",
  * "Zatrzymany (meta)". */
@@ -133,11 +141,12 @@ typedef struct {
     int16_t  heading_x10;   /* scałkowany kurs względny [°] * 10, zawinięty (-180,180]; po odjęciu biasu (Krok 2) */
     int16_t  lidar_mm[8];   /* min. odległość w 8 sektorach [mm]; 0 = otwarte. Kolejność jak w SEC_* */
     int16_t  corridor_mm;   /* Krok 6: min. odległość w korytarzu na wprost (3 promienie) [mm] */
+    int16_t  line_fr_mv;    /* czujnik linii przód-prawy (ADS1115 A0) [mV] */
     int16_t  line_fl_mv;    /* czujnik linii przód-lewy [mV] */
     int16_t  line_bl_mv;    /* tył-lewy [mV] */
     int16_t  line_br_mv;    /* tył-prawy [mV] */
-    int16_t  hall_mv;       /* napięcie Halla mety (A0) [mV] - Krok 5e, do weryfikacji falszywych trafien */
-    uint8_t  hall_hit;      /* finish_detected w chwili próbki (0/1) - Krok 5e */
+    int8_t   hall_do;       /* surowy stan pinu DO cyfrowego Halla mety (0/1) */
+    uint8_t  hall_hit;      /* meta wg polaryzacji DO (hall_finish_detected) w chwili próbki (0/1) */
     int16_t  obj_temp_x10;  /* pirometr: temperatura obiektu [°C] * 10 */
     int16_t  amb_temp_x10;  /* pirometr: temperatura otoczenia [°C] * 10 */
 } autonomy_log_rec_t;

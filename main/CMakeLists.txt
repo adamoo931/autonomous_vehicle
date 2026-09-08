@@ -19,6 +19,7 @@ idf_component_register(SRCS
     "sensors/sht40.c"
     "sensors/pyrometer.c"
     "sensors/ads1115.c"
+    "sensors/hall_finish.c"
     "sensors/line_sensor.c"
     "sensors/odometry.c"
     "sensors/lidar.c"

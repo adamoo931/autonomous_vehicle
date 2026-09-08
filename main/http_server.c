@@ -7,6 +7,7 @@
 #include "ina219.h"
 #include "sht40.h"
 #include "ads1115.h"
+#include "hall_finish.h"
 #include "buzzer.h"
 #include "lidar.h"
 #include "autonomy.h"
@@ -103,19 +104,13 @@ static const char DASHBOARD_HTML[] =
     "    <div>Adres I2C: <span class=\"val\" id=\"sh-addr\">-</span></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
-    "    <h2>&#129442; Halla mety (SS495A)</h2>\n"
-    "    <div>Napi&#281;cie: <span class=\"val\" id=\"hl-v\">-</span> V</div>\n"
+    "    <h2>&#129442; Halla mety (49E, cyfrowy DO)</h2>\n"
+    "    <div>DO surowy: <span class=\"val\" id=\"hl-do\" style=\"font-size:1.3em\">-</span></div>\n"
     "    <div>Meta: <span class=\"val\" id=\"hl-det\">-</span></div>\n"
-    "    <div>Adres I2C: <span class=\"val\" id=\"hl-addr\">-</span></div>\n"
-    "    <div style=\"display:flex;gap:6px;align-items:center;margin-top:6px;flex-wrap:wrap\">\n"
-    "      <label>Pr&#243;g [V]:</label>\n"
-    "      <input type=\"number\" id=\"hl-thr-in\" min=\"0.001\" max=\"2\" step=\"0.005\" value=\"0.040\" style=\"width:80px\">\n"
-    "      <button onclick=\"setHallThreshold()\">Zapisz</button>\n"
-    "    </div>\n"
-    "    <div style=\"font-size:0.85em;color:#8b949e\">ustawiony: <span class=\"val\" id=\"hl-thr-cur\">-</span> V (odchy&#322;ka od spoczynku)</div>\n"
-    "    <div style=\"font-size:0.85em;color:#8b949e\">spoczynek (auto-kalibracja Kroku 5c): <span class=\"val\" id=\"hl-rest-cur\">-</span> V</div>\n"
+    "    <label style=\"display:block;margin-top:6px;font-size:0.9em\"><input type=\"checkbox\" id=\"hl-alow\" onchange=\"setHallActiveLow()\"> meta = DO w stanie LOW</label>\n"
+    "    <div style=\"font-size:0.8em;color:#8b949e\">Pr&#243;g ustaw potencjometrem na module, patrz&#261;c na \"DO surowy\" &#8211; ma prze&#322;&#261;cza&#263; si&#281; przy magnesie. Potem ustaw polaryzacj&#281; powy&#380;ej, tak by \"Meta\" = WYKRYTO tylko z magnesem.</div>\n"
     "    <label style=\"display:block;margin-top:6px;font-size:0.9em\"><input type=\"checkbox\" id=\"hl-manual\" onchange=\"setHallManual()\"> reaguj na Hall w je&#378;dzie r&#281;cznej</label>\n"
-    "    <div style=\"font-size:0.8em;color:#8b949e\">(w autonomii Hall dzia&#322;a zawsze, niezale&#380;nie od tego)</div>\n"
+    "    <div style=\"font-size:0.8em;color:#8b949e\">(w autonomii meta jest sygnalizowana decyzj&#261; autonomii, niezale&#380;nie od tego)</div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#128207; Odometria</h2>\n"
@@ -129,10 +124,10 @@ static const char DASHBOARD_HTML[] =
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#9633; Czujniki linii CNY70</h2>\n"
+    "    <div>Prz&#243;d P (A0): <span class=\"val\" id=\"ls-fr-v\">-</span> V &nbsp; <span id=\"ls-fr\">-</span></div>\n"
     "    <div>Prz&#243;d L (A1): <span class=\"val\" id=\"ls-fl-v\">-</span> V &nbsp; <span id=\"ls-fl\">-</span></div>\n"
     "    <div>Ty&#322; L (A2): <span class=\"val\" id=\"ls-bl-v\">-</span> V &nbsp; <span id=\"ls-bl\">-</span></div>\n"
     "    <div>Ty&#322; P (A3): <span class=\"val\" id=\"ls-br-v\">-</span> V &nbsp; <span id=\"ls-br\">-</span></div>\n"
-    "    <div>Prz&#243;d P (GPIO): <span id=\"ls-fr\">-</span></div>\n"
     "  </div>\n"
     "  <div class=\"card\">\n"
     "    <h2>&#9881;&#65039; Silniki</h2>\n"
@@ -333,16 +328,11 @@ static const char DASHBOARD_HTML[] =
     "      document.getElementById('od-pr').textContent=d.odometry.pulses_right;\n"
     "    }\n"
     "    if(d.hall){\n"
-    "      document.getElementById('hl-v').textContent=d.hall.voltage_v.toFixed(3);\n"
-    "      document.getElementById('hl-det').innerHTML=d.hall.finish_detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
-    "      document.getElementById('hl-addr').innerHTML=d.hall.initialized?('0x'+d.hall.address.toString(16)):'<span class=\"err\">BRAK</span>';\n"
-    "      if(typeof d.hall.finish_threshold_v!=='undefined'){\n"
-    "        document.getElementById('hl-thr-cur').textContent=d.hall.finish_threshold_v.toFixed(3);\n"
-    "        var hti=document.getElementById('hl-thr-in');\n"
-    "        if(document.activeElement!==hti && !hti.dataset.touched){hti.value=d.hall.finish_threshold_v.toFixed(3);}\n"
-    "      }\n"
-    "      if(typeof d.hall.finish_rest_v!=='undefined'){\n"
-    "        document.getElementById('hl-rest-cur').textContent=d.hall.finish_rest_v.toFixed(3);\n"
+    "      if(typeof d.hall.do_raw!=='undefined') document.getElementById('hl-do').textContent=d.hall.do_raw;\n"
+    "      document.getElementById('hl-det').innerHTML=d.hall.detected?'<span class=\"ok\">WYKRYTO</span>':'Nie';\n"
+    "      if(typeof d.hall.active_low!=='undefined'){\n"
+    "        var ha=document.getElementById('hl-alow');\n"
+    "        if(document.activeElement!==ha) ha.checked=d.hall.active_low;\n"
     "      }\n"
     "      if(typeof d.hall.manual_enabled!=='undefined'){\n"
     "        var hm=document.getElementById('hl-manual');\n"
@@ -353,14 +343,15 @@ static const char DASHBOARD_HTML[] =
     "      var ls=d.line_sensors;\n"
     "      var ld=function(v){return v?'<span class=\"ok\">WYKRYTO</span>':'Nie';};\n"
     "      if(typeof ls.front_left_v!=='undefined'){\n"
+    "        document.getElementById('ls-fr-v').textContent=ls.front_right_v.toFixed(3);\n"
     "        document.getElementById('ls-fl-v').textContent=ls.front_left_v.toFixed(3);\n"
     "        document.getElementById('ls-bl-v').textContent=ls.back_left_v.toFixed(3);\n"
     "        document.getElementById('ls-br-v').textContent=ls.back_right_v.toFixed(3);\n"
     "      }\n"
+    "      document.getElementById('ls-fr').innerHTML=ld(ls.front_right);\n"
     "      document.getElementById('ls-fl').innerHTML=ld(ls.front_left);\n"
     "      document.getElementById('ls-bl').innerHTML=ld(ls.back_left);\n"
     "      document.getElementById('ls-br').innerHTML=ld(ls.back_right);\n"
-    "      document.getElementById('ls-fr').innerHTML=ld(ls.front_right);\n"
     "    }\n"
     "    if(d.motors){\n"
     "      document.getElementById('m-l').textContent=d.motors.left;\n"
@@ -468,17 +459,12 @@ static const char DASHBOARD_HTML[] =
     "      if(d&&typeof d.scan_deg!=='undefined'){sdi.value=d.scan_deg;pmi.value=d.pass_ms;}\n"
     "    }).catch(function(){});\n"
     "}\n"
-    "document.getElementById('hl-thr-in').addEventListener('input',function(){this.dataset.touched='1';});\n"
-    "function setHallThreshold(){\n"
-    "  var v=parseFloat(document.getElementById('hl-thr-in').value);\n"
-    "  if(isNaN(v)){alert('Podaj napi\\u0119cie progowe w woltach');return;}\n"
-    "  fetch('/api/hall/threshold',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({threshold_v:v})})\n"
+    "function setHallActiveLow(){\n"
+    "  var al=document.getElementById('hl-alow').checked;\n"
+    "  fetch('/api/hall/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active_low:al})})\n"
     "    .then(function(r){return r.json();})\n"
-    "    .then(function(d){if(d&&typeof d.finish_threshold_v!=='undefined'){\n"
-    "      var hti=document.getElementById('hl-thr-in');delete hti.dataset.touched;\n"
-    "      hti.value=d.finish_threshold_v.toFixed(3);\n"
-    "      document.getElementById('hl-thr-cur').textContent=d.finish_threshold_v.toFixed(3);\n"
-    "    }}).catch(function(){});\n"
+    "    .then(function(d){if(d&&typeof d.active_low!=='undefined'){document.getElementById('hl-alow').checked=d.active_low;}})\n"
+    "    .catch(function(){});\n"
     "}\n"
     "function setHallManual(){\n"
     "  var en=document.getElementById('hl-manual').checked;\n"
@@ -668,20 +654,16 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddNumberToObject(odo, "dist_total_mm",  (double)od.dist_total_mm);
     cJSON_AddItemToObject(root, "odometry", odo);
 
-    /* Czujnik Halla mety (SS495A przez ADS1115) */
-    ads1115_data_t hall = ads1115_get_last();
+    /* Czujnik Halla mety - cyfrowy (49E + LM393 + potencjometr, DO na GPIO) */
     cJSON *hallj = cJSON_CreateObject();
-    cJSON_AddNumberToObject(hallj, "voltage_v",          (double)hall.voltage_v);
-    cJSON_AddBoolToObject(hallj,   "finish_detected",    hall.finish_detected);
-    cJSON_AddNumberToObject(hallj, "finish_threshold_v", (double)ads1115_get_finish_threshold());
-    cJSON_AddNumberToObject(hallj, "finish_rest_v",      (double)ads1115_get_finish_rest_v());
-    cJSON_AddBoolToObject(hallj,   "manual_enabled",     ads1115_get_hall_manual_enabled());
-    cJSON_AddNumberToObject(hallj, "address",            hall.address);
-    cJSON_AddBoolToObject(hallj,   "initialized",        hall.initialized);
+    cJSON_AddNumberToObject(hallj, "do_raw",         hall_finish_do_raw());
+    cJSON_AddBoolToObject(hallj,   "detected",       hall_finish_detected());
+    cJSON_AddBoolToObject(hallj,   "active_low",     hall_finish_get_active_low());
+    cJSON_AddBoolToObject(hallj,   "manual_enabled", hall_finish_get_manual_enabled());
     cJSON_AddItemToObject(root, "hall", hallj);
 
-    /* Czujniki linii (przód-L/tył-L/tył-P analogowo przez ADS1115 A1..A3,
-     * przód-P cyfrowo przez GPIO) */
+    /* Czujniki linii - 4x analogowo przez ADS1115 (A0 przód-P, A1 przód-L,
+     * A2 tył-L, A3 tył-P) */
     line_sensor_data_t ls = line_sensor_read();
     cJSON *line = cJSON_CreateObject();
     cJSON_AddBoolToObject(line,   "front_left",    ls.front_left);
@@ -689,6 +671,7 @@ static esp_err_t handle_sensors(httpd_req_t *req) {
     cJSON_AddBoolToObject(line,   "back_left",     ls.back_left);
     cJSON_AddBoolToObject(line,   "back_right",    ls.back_right);
     cJSON_AddNumberToObject(line, "front_left_v",  (double)ls.front_left_v);
+    cJSON_AddNumberToObject(line, "front_right_v", (double)ls.front_right_v);
     cJSON_AddNumberToObject(line, "back_left_v",   (double)ls.back_left_v);
     cJSON_AddNumberToObject(line, "back_right_v",  (double)ls.back_right_v);
     cJSON_AddItemToObject(root, "line_sensors", line);
@@ -951,7 +934,7 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         "gyro_x_dps,gyro_y_dps,gyro_z_dps,gyro_z_filt_dps,gyro_bias_dps,kurs_deg,"
         "lidar_przod_mm,lidar_przodL_mm,lidar_lewo_mm,lidar_tylL_mm,"
         "lidar_tyl_mm,lidar_tylP_mm,lidar_prawo_mm,lidar_przodP_mm,korytarz_mm,"
-        "linia_PL_mV,linia_TL_mV,linia_TP_mV,hall_mV,hall_wykryto,"
+        "linia_PP_mV,linia_PL_mV,linia_TL_mV,linia_TP_mV,hall_do,hall_wykryto,"
         "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
     httpd_resp_send_chunk(req, header, strlen(header));
 
@@ -963,14 +946,14 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         float obj = r.obj_temp_x10 / 10.0f;
         float amb = r.amb_temp_x10 / 10.0f;
         int len = snprintf(buf, sizeof(buf),
-            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
             (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
             r.motor_l, r.motor_r,
             r.gyro_x_x10 / 10.0f, r.gyro_y_x10 / 10.0f, r.gyro_z_x10 / 10.0f,
             r.gyro_zf_x10 / 10.0f, r.gyro_bias_x10 / 10.0f, r.heading_x10 / 10.0f,
             r.lidar_mm[0], r.lidar_mm[1], r.lidar_mm[2], r.lidar_mm[3],
             r.lidar_mm[4], r.lidar_mm[5], r.lidar_mm[6], r.lidar_mm[7], r.corridor_mm,
-            r.line_fl_mv, r.line_bl_mv, r.line_br_mv, r.hall_mv, r.hall_hit,
+            r.line_fr_mv, r.line_fl_mv, r.line_bl_mv, r.line_br_mv, r.hall_do, r.hall_hit,
             obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
     }
@@ -1123,37 +1106,26 @@ static esp_err_t handle_autonomy_lidar(httpd_req_t *req) {
     return ESP_OK;
 }
 
-/* POST /api/hall/threshold {"threshold_v":N} - ustawia próg detekcji mety
- * czujnikiem Halla: maksymalną odchyłkę napięcia SS495A od wartości
- * spoczynkowej (HALL_FINISH_REST_V), przy której meldowana jest meta.
- * Wartość w woltach; moduł ADS1115 przycina ją do sensownego zakresu.
- * Odpowiada aktualnie obowiązującym progiem (po przycięciu). */
-static esp_err_t handle_hall_threshold(httpd_req_t *req) {
-    if (req->content_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing body");
-        return ESP_FAIL;
+/* POST /api/hall/config {"active_low":true/false} - polaryzacja cyfrowego
+ * wyjścia DO czujnika Halla mety: true = "meta" gdy DO w stanie LOW (typowe
+ * moduły LM393), false = gdy HIGH. Próg jest sprzętowy (potencjometr na
+ * module) - tu tylko interpretacja stanu. Brak/niepełne ciało pozostawia
+ * bieżącą wartość. Odpowiada aktualnym stanem. */
+static esp_err_t handle_hall_config(httpd_req_t *req) {
+    if (req->content_len > 0) {
+        char buf[64];
+        if (read_body(req, buf, sizeof(buf)) > 0) {
+            cJSON *j = cJSON_Parse(buf);
+            if (j) {
+                cJSON *e = cJSON_GetObjectItem(j, "active_low");
+                if (e) hall_finish_set_active_low(cJSON_IsTrue(e) ||
+                                (cJSON_IsNumber(e) && e->valuedouble != 0));
+                cJSON_Delete(j);
+            }
+        }
     }
-    char buf[64];
-    if (read_body(req, buf, sizeof(buf)) <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad body");
-        return ESP_FAIL;
-    }
-    cJSON *j = cJSON_Parse(buf);
-    if (!j) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
-        return ESP_FAIL;
-    }
-    cJSON *t = cJSON_GetObjectItem(j, "threshold_v");
-    if (!cJSON_IsNumber(t)) {
-        cJSON_Delete(j);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing threshold_v");
-        return ESP_FAIL;
-    }
-    ads1115_set_finish_threshold((float)t->valuedouble);
-    cJSON_Delete(j);
-
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "finish_threshold_v", (double)ads1115_get_finish_threshold());
+    cJSON_AddBoolToObject(root, "active_low", hall_finish_get_active_low());
     char *s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
@@ -1164,10 +1136,10 @@ static esp_err_t handle_hall_threshold(httpd_req_t *req) {
 
 /* POST /api/hall/manual {"enabled":true/false} - włącza/wyłącza reakcję na
  * Hall mety podczas jazdy RĘCZNEJ (ton finiszu + zielona dioda + tryb
- * szukania ciepła w main.c). Nie dotyczy autonomii - tam Hall działa
- * zawsze. Brak ciała = przełącz stan. Odpowiada aktualnym stanem. */
+ * szukania ciepła w main.c). Nie dotyczy autonomii - tam meta jest
+ * sygnalizowana decyzją autonomii. Brak ciała = przełącz stan. */
 static esp_err_t handle_hall_manual(httpd_req_t *req) {
-    bool target = !ads1115_get_hall_manual_enabled();   /* domyślnie: przełącz */
+    bool target = !hall_finish_get_manual_enabled();   /* domyślnie: przełącz */
     if (req->content_len > 0) {
         char buf[64];
         if (read_body(req, buf, sizeof(buf)) > 0) {
@@ -1180,10 +1152,10 @@ static esp_err_t handle_hall_manual(httpd_req_t *req) {
             }
         }
     }
-    ads1115_set_hall_manual_enabled(target);
+    hall_finish_set_manual_enabled(target);
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddBoolToObject(root, "manual_enabled", ads1115_get_hall_manual_enabled());
+    cJSON_AddBoolToObject(root, "manual_enabled", hall_finish_get_manual_enabled());
     char *s = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     httpd_resp_set_type(req, "application/json");
@@ -1281,7 +1253,7 @@ esp_err_t http_server_start(void) {
         { .uri="/api/autonomy/speed",   .method=HTTP_POST, .handler=handle_autonomy_speed },
         { .uri="/api/autonomy/lidar",   .method=HTTP_POST, .handler=handle_autonomy_lidar },
         { .uri="/api/autonomy/log.csv", .method=HTTP_GET, .handler=handle_autonomy_log_csv },
-        { .uri="/api/hall/threshold",   .method=HTTP_POST, .handler=handle_hall_threshold },
+        { .uri="/api/hall/config",      .method=HTTP_POST, .handler=handle_hall_config },
         { .uri="/api/hall/manual",      .method=HTTP_POST, .handler=handle_hall_manual },
         { .uri="/api/line_test",        .method=HTTP_POST, .handler=handle_line_test },
     };

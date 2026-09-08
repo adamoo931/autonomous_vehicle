@@ -15,6 +15,7 @@
 #include "ina219.h"
 #include "sht40.h"
 #include "ads1115.h"
+#include "hall_finish.h"
 #include "buzzer.h"
 #include "lidar.h"
 #include "autonomy.h"
@@ -48,9 +49,8 @@ static void sensor_task(void *arg) {
     imu_data_t      imu;
     pyrometer_data_t pyro;
     ina219_data_t   ina;
-    ads1115_data_t  hall;
     int slow = 0;
-    bool was_finish   = false; /* poprzedni stan czujnika Halla mety - do wykrycia zbocza */
+    bool was_finish   = false; /* poprzedni stan sygnału mety - do wykrycia zbocza */
     bool was_hot      = false; /* poprzedni stan wykrycia obiektu cieplnego - do wykrycia zbocza */
     bool was_auto     = false; /* poprzedni stan autonomii - do wykrycia startu przejazdu */
     bool was_line     = false; /* poprzedni stan czujników odbiciowych - do wykrycia zbocza */
@@ -60,7 +60,9 @@ static void sensor_task(void *arg) {
         imu_read(&imu);
         pyrometer_read(&pyro);
         ina219_read(&ina);
-        ads1115_read(&hall);
+        /* Odświeża cache ADS1115 (4 analogowe czujniki linii A0..A3), z
+         * którego korzysta line_sensor_read(). Wynik nie jest tu potrzebny. */
+        ads1115_read(NULL);
         /* SHT40 (temperatura/wilgotność) zmienia się wolno - odczyt co ~1 s. */
         if (++slow >= 10) {
             slow = 0;
@@ -79,21 +81,29 @@ static void sensor_task(void *arg) {
         led_set_green(auto_on || finish_latch);
         led_set_red(!auto_on);
 
-        /* Meta (czujnik Halla SS495A przez ADS1115, próg regulowany z
-         * dashboardu - patrz ads1115_set_finish_threshold): zbocze
-         * "niewykryto -> wykryto" odgrywa jednorazowo pojedynczy 2-sekundowy
-         * jednostajny ton, zapala zieloną diodę (zatrzask finish_latch) i
-         * uruchamia tryb szukania obiektu cieplnego pirometrem. Sam
-         * odczyt/aktualizacja pola na dashboardzie dzieje się już w
-         * http_server przy każdym /api/sensors. */
-        bool is_finish = hall.finish_detected;
-        /* W trybie RĘCZNYM reakcję na Hall (ton + zielona dioda + tryb
-         * szukania ciepła) można wyłączyć z dashboardu - nie zakłóca testów
-         * jazdy ręcznej. W autonomii Hall działa zawsze (autonomy.c ma
-         * własną, bramkowaną obsługę mety). was_finish aktualizujemy zawsze,
-         * żeby po ponownym włączeniu nie odpalić na wciąż trzymanym zboczu. */
-        bool hall_react = auto_on || ads1115_get_hall_manual_enabled();
-        if (hall_react && is_finish && !was_finish) {
+        /* Meta: zbocze "niewykryto -> wykryto" odgrywa jednorazowo pojedynczy
+         * 2-sekundowy jednostajny ton, zapala zieloną diodę (zatrzask
+         * finish_latch) i uruchamia tryb szukania obiektu cieplnego pirometrem.
+         *
+         * Źródło sygnału zależy od trybu:
+         *  - AUTONOMIA (lub stan "Zatrzymany (meta)" tuż po niej): reagujemy na
+         *    DECYZJĘ autonomii (autonomy_finish_reached()), nie na surowy Hall.
+         *    Autonomia potwierdza metę dopiero w oknie kontaktu z taśmą + z
+         *    debounce (autonomy.c, Krok 5c/5d); surowy odczyt Halla potrafi w
+         *    trakcie jazdy - zwłaszcza przy manewrach o dużym poborze prądu
+         *    (obrót w miejscu, cofanie) - "pływać" o setki mV od zakłóceń
+         *    silników i dawać fałszywe zbocza (patrz test_13).
+         *  - RĘCZNY: surowe zbocze cyfrowego Halla (hall_finish_detected()),
+         *    o ile reakcja włączona z dashboardu (hall_finish_get_manual_
+         *    enabled(), domyślnie wyłączona).
+         *
+         * was_finish aktualizujemy zawsze, żeby po zmianie trybu nie odpalić
+         * na wciąż trzymanym zboczu. */
+        bool auto_meta = autonomy_finish_reached();
+        bool is_finish = (auto_on || auto_meta)
+                             ? auto_meta
+                             : (hall_finish_get_manual_enabled() && hall_finish_detected());
+        if (is_finish && !was_finish) {
             buzzer_play_finish_tone();
             finish_latch = true;
             led_set_green(true);
@@ -170,6 +180,7 @@ void app_main(void) {
     i2c_init();
     motor_init();
     line_sensor_init();
+    hall_finish_init();     /* cyfrowy czujnik Halla mety (DO na GPIO) */
     odometry_init();
 
     /* Czujniki na magistrali I2C. Brak czujnika nie przerywa rozruchu -

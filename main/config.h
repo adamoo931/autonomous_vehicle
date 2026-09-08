@@ -26,32 +26,52 @@
 /* ============================================================
  *  Czujniki linii CNY70 (odbiciowe) — wykrywanie krawędzi planszy
  * ------------------------------------------------------------
- *  Przód-lewy, tył-lewy i tył-prawy są odczytywane ANALOGOWO przez ADS1115
- *  (kanały A1/A2/A3 — patrz sensors/ads1115.c); ich napięcia widać na
- *  dashboardzie. Tylko przód-prawy pozostał cyfrowy na GPIO (PIN_LINE_FR to
- *  GPIO tylko-wejście, wymaga zewnętrznego rezystora pull-up).
+ *  WSZYSTKIE CZTERY czujniki są teraz odczytywane ANALOGOWO przez ADS1115
+ *  (kanały A0..A3 — patrz sensors/ads1115.c); ich napięcia widać na
+ *  dashboardzie. Kanał A0 zwolnił się po przeniesieniu detekcji mety na
+ *  cyfrowy czujnik Halla (49E + komparator LM393, sekcja niżej), więc dawny
+ *  cyfrowy przód-prawy z GPIO39 wrócił jako pełnoprawny czujnik na A0.
+ *  GPIO39 jest teraz wolne.
  * ============================================================ */
-#define PIN_LINE_FR     39      /* przód-prawy — jedyny nadal na GPIO       */
 
 /* Progi detekcji linii dla czujników odbiciowych na ADC (osobno na kanał):
  * napięcie PONIŻEJ progu = linia wykryta. Wartości dobrane na docelowym
- * sprzęcie po napięciach pokazywanych na dashboardzie. */
-/* Krok 1b: FL obniżony 1.0->0.6 - podłoga (biała płytka) czytała 1,1-1,3 V,
- * a próg 1,0 V dawał zbyt mały margines; taśma ~0,24 V, więc 0,6 V ma zapas
- * w obie strony. BL/BR mają dobre marginesy - bez zmian. Docelowy dobór na
- * nawierzchni toru. */
-#define LINE_FL_THRESHOLD_V   0.6f   /* A1 — przód-lewy */
-#define LINE_BL_THRESHOLD_V   1.75f   /* A2 — tył-lewy   */
-#define LINE_BR_THRESHOLD_V   0.75f   /* A3 — tył-prawy  */
+ * sprzęcie po napięciach pokazywanych na dashboardzie.
+ *
+ * Dobór po pomiarze na trzech nawierzchniach (napięcia z dashboardu):
+ *                 czerwona płytka | biała płytka | taśma odblaskowa
+ *   PP (A0/FR):        1,90 V      |    1,62 V    |    0,36 V
+ *   PL (A1/FL):        1,88 V      |    1,65 V    |    0,24 V
+ *   TP (A3/BR):        1,71 V      |    1,38 V    |    0,20 V
+ *   TL (A2/BL):        2,70 V      |    2,62 V    |    1,62 V
+ * Próg ustawiony ~0,5-0,8 V POWYŻEJ napięcia na taśmie (szeroki margines na
+ * wykrycie taśmy - jej odczyt skacze w górę mocniej niż płytki w dół),
+ * jednocześnie ~0,4-0,6 V poniżej najniższej płytki. */
+#define LINE_FR_THRESHOLD_V   1.05f  /* A0 — przód-prawy (taśma ~0,36; płytki >=1,62) */
+#define LINE_FL_THRESHOLD_V   0.8f  /* A1 — przód-lewy  (taśma ~0,24; płytki >=1,65) */
+#define LINE_BL_THRESHOLD_V   2.20f  /* A2 — tył-lewy    (taśma ~1,62; płytki >=2,62) */
+#define LINE_BR_THRESHOLD_V   0.90f  /* A3 — tył-prawy   (taśma ~0,20; płytki >=1,38) */
+
+/* ============================================================
+ *  Czujnik Halla mety — CYFROWY (moduł 49E + komparator LM393 + potencjometr)
+ * ============================================================
+ *  Detekcja mety siedzi teraz na wyjściu cyfrowym DO modułu Halla (49E na
+ *  płytce z LM393 i potencjometrem progu), podłączonym do GPIO. Moduł
+ *  zasilany z 3,3 V -> DO w logice 3,3 V, bezpieczne bezpośrednio na pin
+ *  ESP32. To zwolniło kanał ADS1115 A0 dla 4. czujnika linii.
+ *
+ *  Próg ustawia się POTENCJOMETREM na module, obserwując surowy stan pinu DO
+ *  na dashboardzie (karta "Halla mety" -> "DO surowy") - bez miernika.
+ *  Polaryzację ("meta" = DO w stanie LOW czy HIGH) wybiera się przełącznikiem
+ *  na dashboardzie; HALL_FINISH_DO_ACTIVE_LOW to tylko wartość startowa
+ *  (typowe moduły LM393: DO spada do 0 przy przekroczeniu progu).
+ */
+#define PIN_HALL_FINISH_DO         33   /* wejście cyfrowe DO modułu Halla mety */
+#define HALL_FINISH_DO_ACTIVE_LOW   1   /* 1 = "meta" gdy DO=0 (typowo), 0 = gdy DO=1 */
 
 /* ============================================================
  *  Czujniki Halla — odometria kół (cyfrowe, GPIO)
- * ============================================================
- *  Detekcja mety przeniesiona na osobny, analogowy czujnik Halla SS495A
- *  odczytywany przez ADS1115 (patrz sensors/ads1115.c oraz sekcja adresów
- *  I2C i progów detekcji niżej) — GPIO34 (dawny PIN_HALL_FINISH) jest teraz
- *  wolne.
- */
+ * ============================================================ */
 #define PIN_HALL_LEFT    2      /* enkoder lewego koła                      */
 #define PIN_HALL_RIGHT  36      /* enkoder prawego koła (GPIO tylko-wejście)*/
 
@@ -116,7 +136,7 @@
 #define ICM20948_ADDR   0x69    /* IMU ICM-20948 (AD0 = VCC)                */
 #define INA219_ADDR     0x40    /* monitor prądu/napięcia (A0 = A1 = GND)   */
 #define SHT40_ADDR      0x44    /* czujnik temperatury i wilgotności        */
-#define ADS1115_ADDR    0x48    /* ADC dla czujnika Halla mety (ADDR = GND) */
+#define ADS1115_ADDR    0x48    /* ADC dla 4 czujników linii CNY70 A0..A3 (ADDR = GND) */
 
 /* Rezystancja bocznika pomiarowego INA219 (R13) w omach. */
 #define INA219_SHUNT_OHMS  0.05f
@@ -148,19 +168,7 @@
  * pyrometer_start_search() w sensors/pyrometer.c. */
 #define PYROMETER_HOT_DELTA_C          4.0f
 
-/* ============================================================
- *  Próg detekcji mety przez czujnik Halla SS495A (przez ADS1115)
- * ============================================================
- *  SS495A jest liniowy (ratiometryczny) - napięcie w normalnej pracy
- *  (zmierzone na sprzęcie, bez magnesu mety w pobliżu) wynosi ok. 2,488V
- *  (HALL_FINISH_REST_V), a zbliżenie magnesu (dowolnym biegunem) odchyla je
- *  w górę lub w dół. Metę wykrywamy więc jako odchyłkę napięcia od wartości
- *  spoczynkowej o co najmniej próg HALL_FINISH_THRESHOLD_V (w obie strony):
- *      |napięcie - HALL_FINISH_REST_V| >= próg
- *  Próg jest regulowany w trakcie pracy z dashboardu (pole "Próg [V]" w
- *  karcie czujnika Halla, zapis przez POST /api/hall/threshold); poniższa
- *  wartość to tylko domyślna po starcie. Dostrój ją eksperymentalnie na
- *  docelowym sprzęcie, jeśli napięcie spoczynkowe się zmieni (np. inny
- *  egzemplarz czujnika/zasilanie). */
-#define HALL_FINISH_REST_V        2.488f  /* napięcie spoczynkowe SS495A bez magnesu [V] */
-#define HALL_FINISH_THRESHOLD_V   0.050f  /* domyślny próg: |napięcie - spoczynek| >= tego = meta [V] */
+/* Detekcja mety czujnikiem Halla: patrz sekcja "Czujnik Halla mety - CYFROWY"
+ * wyżej (PIN_HALL_FINISH_DO / HALL_FINISH_DO_ACTIVE_LOW) oraz
+ * sensors/hall_finish.c. Próg jest sprzętowy (potencjometr na module), więc
+ * nie ma tu już stałych progu/napięcia spoczynkowego. */

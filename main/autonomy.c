@@ -4,7 +4,7 @@
 #include "pyrometer.h"
 #include "ina219.h"
 #include "line_sensor.h"
-#include "ads1115.h"
+#include "hall_finish.h"
 #include "imu.h"
 #include "lidar.h"
 
@@ -234,8 +234,9 @@ static int corridor_min_mm(int lookahead_mm) { return corridor_min_at(0, lookahe
  *       corridor_min_at() na AVOID_LOOKAHEAD_MM. "Przejezdny" = przeswit
  *       >= s_front_stop_mm + AVOID_CLEAR_MARGIN_MM. Z przejezdnych wybiera
  *       ten NAJBLIZSZY namiarowi na cel (heading_err), remis rozstrzyga
- *       wiekszy przeswit. Brak przejezdnego -> ST_OBSTACLE (jak w Kroku 6;
- *       ucieczka z pulapek U/L to Krok 8).
+ *       wiekszy przeswit. Brak przejezdnego -> ucieczka z pulapki (Krok 8:
+ *       ST_TRAP_BACK / ST_TRAP_TURN / ST_TRAP_ESCAPE), a po jej wyczerpaniu
+ *       -> ST_OBSTACLE (stoj).
  *    2. ST_AVOID_TURN  - obrot w miejscu (moc AVOID_TURN_PCT) do kursu
  *       szczeliny (s_avoid_heading_deg, we wspolrzednych estymatora), z
  *       tolerancja AVOID_TURN_TOL_DEG i limitem czasu AVOID_TURN_MAX_MS.
@@ -260,7 +261,16 @@ static int corridor_min_mm(int lookahead_mm) { return corridor_min_at(0, lookahe
 #define AVOID_SCAN_MAX_DEG_MAX  120
 #define AVOID_SCAN_STEP_DEG      10    /* rozdzielczosc katowa skanu */
 #define AVOID_LOOKAHEAD_MM      700    /* zasieg oceny szczeliny [mm] */
-#define AVOID_CLEAR_MARGIN_MM   150    /* wymagany przeswit PONAD prog STOP [mm] */
+#define AVOID_CLEAR_MARGIN_MM   100    /* Krok 7d: wymagany przeswit PONAD prog STOP dla
+                                        * "wygodnej" szczeliny [mm] (150 -> 100: przy prog STOP
+                                        * 300 mm i przeszkodach ~300-400 mm prog 450 byl
+                                        * nieosiagalny -> ciagle falszywe wejscia w ucieczke,
+                                        * test_16) */
+#define AVOID_CREEP_MARGIN_MM    30    /* Krok 7d: przeswit PONAD prog STOP przy ktorym jedziemy
+                                        * ciasna szczelina POWOLI zamiast szukac ucieczki [mm].
+                                        * MNIEJSZY niz AVOID_CLEAR_MARGIN - to niższy prog. */
+#define AVOID_CREEP_SPEED_NUM     2    /* Krok 7d: predkosc w trybie "creep" = s_speed_pct * 2/3 */
+#define AVOID_CREEP_SPEED_DEN     3
 #define AVOID_SIDE_STICK_COST  100000  /* Krok 7c: kara w f. kosztu za zmiane strony obejscia
                                         * w trakcie epizodu - praktycznie blokada (strona raz
                                         * obrana obowiazuje do konca epizodu), ale wciaz mozliwe
@@ -277,6 +287,9 @@ static int corridor_min_mm(int lookahead_mm) { return corridor_min_at(0, lookahe
 #define AVOID_PASS_MS_MAX     6000
 #define AVOID_RECOVERY_MS     1800     /* Krok 7b: okno lagodnego powrotu na kurs po przejezdzie */
 #define AVOID_RECOVERY_TURN_MAX  12    /* Krok 7b: limit skretu w tym oknie (norm. TURN_MAX=25) */
+#define AVOID_RECOVERY_ERR_MAX 45.0f   /* Krok 7d: powyzej tego bledu kursu w oknie powrotu
+                                        * skret NIE jest ograniczany (po obrocie w pulapce trzeba
+                                        * odkrecic ~180 st - lagodny limit tylko wydluzal bladzenie) */
 #define AVOID_MAX_RESCANS        4     /* ile razy w jednym epizodzie ponawiac skan */
 #define AVOID_RESCAN_INTERVAL_MS 1200 /* w ST_OBSTACLE: co ile ponawiac skan */
 
@@ -286,7 +299,43 @@ static float        s_avoid_heading_deg = 0.0f;  /* kurs szczeliny (wspolrzedne 
 static int          s_avoid_rescans = 0;         /* licznik ponowien skanu w epizodzie */
 static int          s_avoid_last_side = 0;        /* Krok 7b: strona ostatniego obejscia: -1=P, +1=L, 0=brak */
 static bool         s_avoid_turn_big = false;     /* Krok 7b: czy obrot wymaga fazy ustalania kursu */
+static bool         s_avoid_creep = false;        /* Krok 7d: biezacy przejazd w trybie "creep" (wolno) */
 static uint32_t     s_avoid_recovery_until = 0;   /* Krok 7b: ms, do kiedy ograniczony skret w ST_CRUISE */
+
+/* =====================================================================
+ *  Krok 8: ucieczka z pulapki (U / L / slepy naroznik)
+ *
+ *  Gdy skan szczelin (ST_AVOID_SCAN) nie znajduje NIC przejezdnego w
+ *  +/-s_scan_max_deg, zamiast od razu stac (ST_OBSTACLE):
+ *   1. ST_TRAP_BACK  - cofnij sie TRAP_BACK_MS (o ile z tylu jest wolne,
+ *      TRAP_BACK_MIN_REAR_MM) i skanuj ponownie z dalszej pozycji - sciany
+ *      pulapki obejmuja wtedy mniejszy kat i szczelina czesto sie pojawia.
+ *      Do TRAP_MAX_BACKUPS prob.
+ *   2. ST_TRAP_TURN  - dalej nic: pelny obrot LIDAR-em (co TRAP_SWEEP_STEP_DEG
+ *      na 360 st) -> najszerszy otwarty kierunek (zwykle "usta" pulapki,
+ *      czesto z TYLU, gdzie brak echa = D_OPEN_MM). Obrot w miejscu do niego.
+ *   3. ST_TRAP_ESCAPE - jazda tym kursem TRAP_ESCAPE_MS (kontrola korytarza
+ *      dalej aktywna: przeszkoda -> ST_AVOID_SCAN). Potem ST_CRUISE z DLUGIM
+ *      oknem lagodnego powrotu (TRAP_RECOVERY_MS) i ustawiona strona obejscia
+ *      = strona ucieczki, zeby regulator wracal na cel LUKIEM obok pulapki,
+ *      a nie prosto w nia.
+ *  Jesli i to nie pomoze (TRAP_MAX_ESCAPES prob) -> ST_OBSTACLE (jak Krok
+ *  6/7: stoj, skanuj co 1,2 s - czekaj az scena sie zmieni). Linia toru
+ *  dalej priorytetowo. Wszystko czasowe (odometria zepsuta). */
+#define TRAP_BACK_MS           1200   /* czas cofania przed ponownym skanem */
+#define TRAP_BACK_MIN_REAR_MM   350   /* nie cofaj sie, jesli z tylu blizej niz to */
+#define TRAP_MAX_BACKUPS          3
+#define TRAP_SWEEP_STEP_DEG      15    /* rozdzielczosc pelnego obrotu LIDAR */
+#define TRAP_SWEEP_ARC_HALF      12    /* polowa luku pojedynczego promienia sweep */
+#define TRAP_OPEN_MIN_MM        900   /* najszerszy kierunek musi miec chociaz tyle */
+#define TRAP_TURN_TOL_DEG         8.0f
+#define TRAP_TURN_MAX_MS       6000    /* obrot do "ust" moze byc az ~180 st */
+#define TRAP_ESCAPE_MS         3500    /* jazda na wyjscie - dluzej niz zwykly przejazd */
+#define TRAP_RECOVERY_MS       3500    /* dlugie okno lagodnego powrotu po ucieczce */
+#define TRAP_MAX_ESCAPES         3     /* po tylu nieudanych probach -> ST_OBSTACLE */
+
+static int      s_trap_backups = 0;
+static int      s_trap_escapes = 0;
 
 /* Stany maszyny sterujacej. */
 typedef enum {
@@ -298,6 +347,9 @@ typedef enum {
     ST_AVOID_TURN,    /* Krok 7: obrot w miejscu do kursu wybranej szczeliny */
     ST_AVOID_SETTLE,  /* Krok 7b: bezruch po obrocie - ustalenie estymatora kursu */
     ST_AVOID_PASS,    /* Krok 7: jazda przez szczeline, by minac przeszkode */
+    ST_TRAP_BACK,     /* Krok 8: brak szczeliny - cofnij sie i skanuj ponownie */
+    ST_TRAP_TURN,     /* Krok 8: obrot w miejscu ku najszerszemu otwartemu kierunkowi */
+    ST_TRAP_ESCAPE,   /* Krok 8: jazda na wyjscie z pulapki */
     ST_LINE_WAIT,     /* linia wykryta - postoj i oczekiwanie na potwierdzenie mety Hallem */
     ST_LINE_BACKUP,   /* to nie meta - cofanie */
     ST_LINE_PAUSE,    /* krotki postoj po cofnieciu, przed ponowna proba jazdy */
@@ -348,10 +400,6 @@ static int      s_bias_n   = 0;
 static float    s_bias_min = 0.0f;
 static float    s_bias_max = 0.0f;
 
-/* Akumulator kalibracji napiecia spoczynkowego Halla (ST_GYRO_CAL, razem
- * z biasem zyra - patrz ads1115_set_finish_rest_v()). */
-static float    s_hall_sum = 0.0f;
-
 /* Chwila zakonczenia kalibracji zyra (pierwsze wejscie w ST_CRUISE w danym
  * przejezdzie) - punkt odniesienia dla START_LINE_IGNORE_MS. Ustawiane raz
  * na przejazd, NIE przy kazdym powrocie do ST_CRUISE po odbiciu. */
@@ -377,6 +425,9 @@ static const char *state_name(st_t s) {
         case ST_AVOID_TURN:  return "Omijanie - obrot";
         case ST_AVOID_SETTLE: return "Omijanie - ustalanie kursu";
         case ST_AVOID_PASS:  return "Omijanie - przejazd";
+        case ST_TRAP_BACK:   return "Pulapka - cofanie";
+        case ST_TRAP_TURN:   return "Pulapka - obrot ku wyjsciu";
+        case ST_TRAP_ESCAPE: return "Pulapka - wyjscie";
         case ST_LINE_WAIT:   return "Linia - sprawdzam mete";
         case ST_LINE_BACKUP: return "Cofanie (nie meta)";
         case ST_LINE_PAUSE:  return "Postoj po cofnieciu";
@@ -414,7 +465,8 @@ static inline void stop_run(void) { s_run_elapsed_ms = now_ms() - s_run_t0; }
 typedef struct {
     imu_data_t         imu;
     line_sensor_data_t line;
-    ads1115_data_t      hall;      /* Krok 5e: A0 (Hall mety) + finish_detected */
+    int8_t             hall_do;    /* surowy stan pinu DO cyfrowego Halla mety (0/1) */
+    bool               hall_hit;   /* meta wg polaryzacji DO (hall_finish_detected) */
     int16_t            sec_mm[SEC_COUNT];
     int16_t            corridor_mm; /* Krok 6: min. korytarza na wprost [mm] */
     float              heading_deg;
@@ -423,9 +475,10 @@ typedef struct {
 
 static telem_t telem_snapshot(void) {
     telem_t t;
-    t.imu  = imu_get_last();
-    t.line = line_sensor_read();
-    t.hall = ads1115_get_last();
+    t.imu     = imu_get_last();
+    t.line    = line_sensor_read();
+    t.hall_do  = (int8_t)hall_finish_do_raw();
+    t.hall_hit = hall_finish_detected();
     for (int i = 0; i < SEC_COUNT; i++)
         t.sec_mm[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
     t.corridor_mm = (int16_t)corridor_min_mm(s_front_stop_mm);
@@ -457,24 +510,26 @@ static void record_sample(uint32_t now, pyrometer_data_t pd, const telem_t *tl) 
     r->heading_x10  = (int16_t)(tl->heading_deg * 10.0f);
     for (int i = 0; i < SEC_COUNT; i++) r->lidar_mm[i] = tl->sec_mm[i];
     r->corridor_mm  = tl->corridor_mm;
-    r->line_fl_mv   = (int16_t)(tl->line.front_left_v * 1000.0f);
-    r->line_bl_mv   = (int16_t)(tl->line.back_left_v  * 1000.0f);
-    r->line_br_mv   = (int16_t)(tl->line.back_right_v * 1000.0f);
-    r->hall_mv      = (int16_t)(tl->hall.voltage_v * 1000.0f);
-    r->hall_hit     = tl->hall.finish_detected ? 1 : 0;
+    r->line_fr_mv   = (int16_t)(tl->line.front_right_v * 1000.0f);
+    r->line_fl_mv   = (int16_t)(tl->line.front_left_v  * 1000.0f);
+    r->line_bl_mv   = (int16_t)(tl->line.back_left_v   * 1000.0f);
+    r->line_br_mv   = (int16_t)(tl->line.back_right_v  * 1000.0f);
+    r->hall_do      = tl->hall_do;
+    r->hall_hit     = tl->hall_hit ? 1 : 0;
     r->obj_temp_x10 = (int16_t)(pd.object_temp  * 10.0f);
     r->amb_temp_x10 = (int16_t)(pd.ambient_temp * 10.0f);
 }
 
-/* Wykrycie linii toru na potrzeby autonomii - bazuje WYLACZNIE na trzech
- * czujnikach odbiciowych CNY70 podpietych analogowo przez ADS1115
- * (przod-lewy A1, tyl-lewy A2, tyl-prawy A3). Czwarty czujnik (przod-prawy,
- * cyfrowy na GPIO PIN_LINE_FR) jest tu swiadomie pomijany - potrafi dawac
- * falszywe odczyty. Nie uzywamy line_sensor_any_edge(), bo ono uwzglednia
- * tez ten czujnik GPIO. */
+/* Wykrycie linii toru na potrzeby autonomii - wszystkie CZTERY czujniki
+ * odbiciowe CNY70 sa teraz analogowe przez ADS1115 (A0 przod-prawy, A1
+ * przod-lewy, A2 tyl-lewy, A3 tyl-prawy). Dawny cyfrowy przod-prawy z GPIO
+ * (i jego falszywe odczyty) zniknal razem z przeniesieniem czujnika Halla
+ * mety na wyjscie cyfrowe - kanal A0 zwolnil sie dla pelnoprawnego czujnika
+ * linii, wiec przod-prawy wraca do uwzgledniania (poprawia wykrycie krawedzi
+ * z przodu, ktore wczesniej "widzialo" tylko lewy rog). */
 static inline bool track_line_detected(void) {
     line_sensor_data_t d = line_sensor_read();
-    return d.front_left || d.back_left || d.back_right;
+    return d.front_left || d.front_right || d.back_left || d.back_right;
 }
 
 /* Krok 5b: patrz definicja EDGE_TURN_AWAY_DEG - klasyfikacja strony
@@ -528,10 +583,15 @@ static bool line_confirmed(void) {
  *   Bez tego estymator kursu (rozhustany po szybkich obrotach) rozhustywal
  *     tez wybor strony -> migotanie L/P miedzy skanami (test_10).
  *
+ * Krok 7d: prog przeswitu "przejezdnosci" przekazywany jest jako need_mm -
+ * ST_AVOID_SCAN wola najpierw z progiem "wygodnym" (STOP + AVOID_CLEAR_MARGIN),
+ * a gdy nic nie przejdzie - z progiem "creep" (STOP + AVOID_CREEP_MARGIN) i
+ * jedzie wtedy wolniej. Dopiero gdy i to zawiedzie -> ucieczka z pulapki.
+ *
  * Zwraca kierunek wzgledny [st] (+ = w lewo) albo INT_MIN, gdy zaden nie
  * przechodzi. */
-static int avoid_pick_gap(void) {
-    int need = s_front_stop_mm + AVOID_CLEAR_MARGIN_MM;
+static int avoid_pick_gap(int need_mm) {
+    int need = need_mm;
 
     /* Krok 7b: wprost wolne -> nie obracaj sie po nic. */
     if (corridor_min_at(0, AVOID_LOOKAHEAD_MM) >= need) return 0;
@@ -560,15 +620,29 @@ static int avoid_pick_gap(void) {
     return best_rel;
 }
 
-/* Krok 2/5c: rozpoczyna kalibracje biasu gyro_z i napiecia spoczynkowego
- * Halla - zeruje akumulatory i kurs, wchodzi w ST_GYRO_CAL (silniki stoja,
- * patrz obsluga stanu). */
+/* Krok 8: najszerszy otwarty kierunek w pelnym obrocie (co TRAP_SWEEP_STEP_DEG).
+ * Zwraca kat wzgledny [st] (+ = w lewo), a przez out_mm - przeswit w nim.
+ * Brak echa (open_mm -> D_OPEN_MM) liczy sie jako maksymalnie otwarte, wiec
+ * "usta" pulapki (gdzie nie ma sciany) wygrywaja. */
+static int trap_open_dir(int *out_mm) {
+    int best_deg = 0, best_mm = -1;
+    for (int d = -180; d < 180; d += TRAP_SWEEP_STEP_DEG) {
+        int m = open_mm(lidar_arc_mm(d, TRAP_SWEEP_ARC_HALF));
+        if (m > best_mm) { best_mm = m; best_deg = d; }
+    }
+    if (out_mm) *out_mm = best_mm;
+    return best_deg;
+}
+
+/* Krok 2: rozpoczyna kalibracje biasu gyro_z - zeruje akumulatory i kurs,
+ * wchodzi w ST_GYRO_CAL (silniki stoja, patrz obsluga stanu). Czujnik Halla
+ * mety jest teraz cyfrowy z progiem sprzetowym (potencjometr), wiec nie ma
+ * juz kalibracji napiecia spoczynkowego. */
 static void start_gyro_cal(void) {
     s_bias_sum      = 0.0f;
     s_bias_n        = 0;
     s_bias_min      =  1e9f;
     s_bias_max      = -1e9f;
-    s_hall_sum      = 0.0f;
     s_heading_deg   = 0.0f;
     s_line_hit_side = EDGE_SIDE_UNKNOWN;
     s_line_debounce = 0;
@@ -577,7 +651,10 @@ static void start_gyro_cal(void) {
     s_obst_clear_count = 0;
     s_avoid_rescans    = 0;
     s_avoid_last_side  = 0;
+    s_avoid_creep      = false;
     s_avoid_recovery_until = 0;
+    s_trap_backups     = 0;
+    s_trap_escapes     = 0;
     enter(ST_GYRO_CAL);
 }
 
@@ -646,7 +723,7 @@ static void autonomy_task(void *arg) {
             ESP_LOGI(TAG,
                 "[%s] L=%d%% R=%d%% | kurs=%.1f cel=%.1f err=%.1f | gyroZ raw/filt=%.1f/%.1f bias=%.2f /s | "
                 "korytarz=%d/prog=%d mm omij_cel=%.1f | LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
-                "linia PL/TL/TP=%d/%d/%d mV | Hall=%.3fV wykryto=%d",
+                "linia PP/PL/TL/TP=%d/%d/%d/%d mV | hallDO=%d wykryto=%d",
                 state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
                 tl.heading_deg, s_heading_target_deg, heading_err(),
                 tl.imu.gyro_z, tl.gyro_z_filt, s_gyro_bias,
@@ -654,23 +731,22 @@ static void autonomy_task(void *arg) {
                 tl.sec_mm[SEC_FRONT], tl.sec_mm[SEC_FRONT_L], tl.sec_mm[SEC_LEFT],
                 tl.sec_mm[SEC_REAR_L], tl.sec_mm[SEC_REAR], tl.sec_mm[SEC_REAR_R],
                 tl.sec_mm[SEC_RIGHT], tl.sec_mm[SEC_FRONT_R],
-                (int)(tl.line.front_left_v * 1000.0f), (int)(tl.line.back_left_v * 1000.0f),
-                (int)(tl.line.back_right_v * 1000.0f),
-                tl.hall.voltage_v, (int)tl.hall.finish_detected);
+                (int)(tl.line.front_right_v * 1000.0f), (int)(tl.line.front_left_v * 1000.0f),
+                (int)(tl.line.back_left_v * 1000.0f), (int)(tl.line.back_right_v * 1000.0f),
+                (int)tl.hall_do, (int)tl.hall_hit);
             record_sample(now, pd, &tl);
         }
 
-        /* Krok 5c: Hall sprawdzany TYLKO w oknie tuz po kontakcie z tasma
-         * (ST_LINE_WAIT/ST_LINE_BACKUP/ST_LINE_PAUSE), NIE w trakcie zwyklej
-         * jazdy (ST_CRUISE). Magnes lezy pod ta sama tasma co granica toru -
-         * bez kontaktu z tasma nie ma fizycznej mozliwosci, by Hall widzial
-         * prawdziwa mete, wiec "finish_detected" poza tym oknem to niemal na
-         * pewno szum (przy progu 0,05 V zdarzaja sie falszywe zadzialania w
-         * trakcie zwyklej jazdy - podniesienie progu z kolei gubilo
-         * prawdziwa mete). Bramkowanie oknem kontaktu odcina te falszywe
-         * trafienia bez ruszania progu. */
+        /* Krok 5c: Hall (teraz cyfrowy, hall_finish_detected()) sprawdzany
+         * TYLKO w oknie tuz po kontakcie z tasma (ST_LINE_WAIT/ST_LINE_BACKUP/
+         * ST_LINE_PAUSE), NIE w trakcie zwyklej jazdy. Magnes lezy pod ta sama
+         * tasma co granica toru - bez kontaktu z tasma Hall nie widzi
+         * prawdziwej mety, wiec zadzialanie poza tym oknem to niemal na pewno
+         * zaklocenie (test_13: przy manewrach o duzym poborze pradu odczyt
+         * potrafil "plywac"). Bramkowanie oknem kontaktu + debounce odcina te
+         * falszywe trafienia. */
         bool hall_window = (s_state == ST_LINE_WAIT || s_state == ST_LINE_BACKUP || s_state == ST_LINE_PAUSE);
-        if (hall_window && ads1115_get_last().finish_detected) {
+        if (hall_window && hall_finish_detected()) {
             /* Krok 5d: debounce - patrz HALL_DEBOUNCE_COUNT. */
             s_hall_debounce++;
         } else {
@@ -692,14 +768,13 @@ static void autonomy_task(void *arg) {
             break;
 
         case ST_GYRO_CAL: {
-            /* Bezruch - usredniaj gyro_z i napiecie Halla. Silniki stoja. */
+            /* Bezruch - usredniaj gyro_z. Silniki stoja. */
             motor_stop();
             imu_data_t im = imu_get_last();
             s_bias_sum += im.gyro_z;
             s_bias_n++;
             if (im.gyro_z < s_bias_min) s_bias_min = im.gyro_z;
             if (im.gyro_z > s_bias_max) s_bias_max = im.gyro_z;
-            s_hall_sum += ads1115_get_last().voltage_v;
             if (now - s_state_t >= BIAS_CAL_MS) {
                 s_gyro_bias = (s_bias_n > 0) ? (s_bias_sum / (float)s_bias_n) : 0.0f;
                 float spread = s_bias_max - s_bias_min;
@@ -710,16 +785,6 @@ static void autonomy_task(void *arg) {
                     ESP_LOGI(TAG, "Kalibracja zyra OK: bias gyro_z = %.2f °/s "
                                   "(rozrzut %.1f, %d probek). Kurs wyzerowany, cel=%.1f°.",
                              s_gyro_bias, spread, s_bias_n, s_heading_target_deg);
-
-                /* Krok 5c: kalibracja napiecia spoczynkowego Halla - patrz
-                 * komentarz przy ads1115_set_finish_rest_v(). Robot na starcie
-                 * jest z dala od magnesu mety, wiec to bezpieczny moment na
-                 * pomiar. Przycinanie do sensownego zakresu jest juz w
-                 * ads1115_set_finish_rest_v(). */
-                if (s_bias_n > 0) {
-                    float hall_rest = s_hall_sum / (float)s_bias_n;
-                    ads1115_set_finish_rest_v(hall_rest);
-                }
 
                 s_heading_deg = 0.0f;
                 s_run_cruise_start_ms = now;   /* start okna ignorowania tasmy na linii startowej */
@@ -777,6 +842,8 @@ static void autonomy_task(void *arg) {
                     s_obst_block_count = 0;
                     s_obst_clear_count = 0;
                     s_avoid_rescans    = 0;
+                    s_trap_backups     = 0;   /* Krok 8: nowy epizod - licz proby od zera */
+                    s_trap_escapes     = 0;
                     ESP_LOGI(TAG, "Przeszkoda w korytarzu (%d mm < prog %d mm) - szukam szczeliny.",
                              cmin, s_front_stop_mm);
                     motor_stop();
@@ -795,9 +862,13 @@ static void autonomy_task(void *arg) {
                  * mocno ograniczony skret (i bez adaptacji biasu), zeby po
                  * przejezdzie wracac na kurs celu szerokim, spokojnym lukiem,
                  * nie ocierajac sie o dopiero co minieta przeszkode. Kontrola
-                 * korytarza dziala dalej - realne zblizenie i tak zatrzyma. */
-                bool recovering = (s_avoid_recovery_until != 0 && now < s_avoid_recovery_until);
-                if (!recovering) s_avoid_recovery_until = 0;
+                 * korytarza dziala dalej - realne zblizenie i tak zatrzyma.
+                 * Krok 7d: ograniczenie skretu obowiazuje TYLKO przy malym
+                 * bledzie kursu; po obrocie w pulapce (blad ~180 st) trzeba
+                 * odkrecic pelna moca, inaczej robot dlugo bladzi bokiem. */
+                bool in_recovery_window = (s_avoid_recovery_until != 0 && now < s_avoid_recovery_until);
+                bool recovering = in_recovery_window && fabsf(err) < AVOID_RECOVERY_ERR_MAX;
+                if (!in_recovery_window) s_avoid_recovery_until = 0;
 
                 /* Krok 4b: adaptacja biasu - tylko w ustalonej jezdzie prostej
                  * (maly blad kursu I mala filtrowana predkosc katowa), zeby
@@ -864,11 +935,68 @@ static void autonomy_task(void *arg) {
                 enter(ST_LINE_WAIT);
                 break;
             }
-            int gap = avoid_pick_gap();
+            /* Krok 7d: dwustopniowo. Najpierw szukamy "wygodnej" szczeliny
+             * (STOP + AVOID_CLEAR_MARGIN). Jak nie ma - szukamy "creep":
+             * ciasniejszej (STOP + AVOID_CREEP_MARGIN), przez ktora przejedziemy
+             * WOLNIEJ. Dopiero brak i takiej -> ucieczka z pulapki. Bez tego w
+             * gestym polu przeszkod (przeswit ~300-400 mm) nic nie przechodzilo
+             * i robot ciagle wpadal w ucieczke (test_16). */
+            int gap = avoid_pick_gap(s_front_stop_mm + AVOID_CLEAR_MARGIN_MM);
+            s_avoid_creep = false;
             if (gap == INT_MIN) {
-                ESP_LOGI(TAG, "Omijanie: brak przejezdnej szczeliny w +/-%d st - STOP.", s_scan_max_deg);
-                enter(ST_OBSTACLE);
-                break;
+                gap = avoid_pick_gap(s_front_stop_mm + AVOID_CREEP_MARGIN_MM);
+                if (gap != INT_MIN) {
+                    s_avoid_creep = true;
+                    ESP_LOGI(TAG, "Omijanie: brak wygodnej szczeliny - jade ciasna WOLNO (creep).");
+                }
+            }
+            if (gap == INT_MIN) {
+                /* Krok 8: brak szczeliny w +/-scan -> proba wyjscia z pulapki.
+                 * Najpierw kilka razy cofnij sie i skanuj z dalszej pozycji;
+                 * potem obrot ku najszerszemu otwartemu kierunkowi ("usta"
+                 * pulapki) i jazda na wyjscie. Po TRAP_MAX_ESCAPES nieudanych
+                 * probach - STOP (ST_OBSTACLE) jak w Kroku 7. */
+                if (s_trap_escapes >= TRAP_MAX_ESCAPES) {
+                    ESP_LOGW(TAG, "Pulapka: %d prob wyjscia bez efektu - STOP.", s_trap_escapes);
+                    enter(ST_OBSTACLE);
+                    break;
+                }
+                if (s_trap_backups < TRAP_MAX_BACKUPS) {
+                    int rear = open_mm(lidar_arc_mm(180, 20));
+                    if (rear >= TRAP_BACK_MIN_REAR_MM) {
+                        s_trap_backups++;
+                        ESP_LOGI(TAG, "Pulapka: brak szczeliny - cofam sie (%d/%d), tyl wolny %d mm.",
+                                 s_trap_backups, TRAP_MAX_BACKUPS, rear);
+                        enter(ST_TRAP_BACK);
+                        break;
+                    }
+                    ESP_LOGI(TAG, "Pulapka: brak szczeliny, tyl zablokowany (%d mm) - obrot ku wyjsciu.", rear);
+                } else {
+                    ESP_LOGI(TAG, "Pulapka: %d prob cofania bez efektu - obrot ku wyjsciu.", s_trap_backups);
+                }
+                /* Krok 8: najszerszy otwarty kierunek w pelnym obrocie -> cel obrotu. */
+                {
+                    int open_here = 0;
+                    int bdeg = trap_open_dir(&open_here);
+                    if (open_here < TRAP_OPEN_MIN_MM) {
+                        ESP_LOGW(TAG, "Pulapka: brak wyraznie otwartego kierunku (max %d mm w %+d st) - STOP.",
+                                 open_here, bdeg);
+                        s_trap_escapes++;
+                        enter(ST_OBSTACLE);
+                        break;
+                    }
+                    s_avoid_heading_deg = s_heading_deg + (float)bdeg;
+                    while (s_avoid_heading_deg > 180.0f)   s_avoid_heading_deg -= 360.0f;
+                    while (s_avoid_heading_deg <= -180.0f) s_avoid_heading_deg += 360.0f;
+                    /* strona ucieczki - trzymanie sie jej w pozniejszym omijaniu (Krok 7c) */
+                    if      (bdeg >  20 && bdeg <  160) s_avoid_last_side =  1;
+                    else if (bdeg < -20 && bdeg > -160) s_avoid_last_side = -1;
+                    else                               s_avoid_last_side =  0;
+                    ESP_LOGI(TAG, "Pulapka: najszersze wyjscie rel=%+d st (%d mm), kurs docelowy %.1f st - obrot.",
+                             bdeg, open_here, s_avoid_heading_deg);
+                    enter(ST_TRAP_TURN);
+                    break;
+                }
             }
             s_avoid_heading_deg = s_heading_deg + (float)gap;
             while (s_avoid_heading_deg > 180.0f)   s_avoid_heading_deg -= 360.0f;
@@ -1003,6 +1131,136 @@ static void autonomy_task(void *arg) {
                 float turn = KP_HEADING * err + DRIVE_TRIM;
                 if (turn >  (float)TURN_MAX) turn =  (float)TURN_MAX;
                 if (turn < -(float)TURN_MAX) turn = -(float)TURN_MAX;
+                int td  = (int)lroundf(turn);
+                /* Krok 7d: w trybie "creep" (ciasna szczelina) jedziemy wolniej,
+                 * ale nie mniej niz 20% - inaczej naped moze stanac. */
+                int spd = s_speed_pct;
+                if (s_avoid_creep) {
+                    spd = s_speed_pct * AVOID_CREEP_SPEED_NUM / AVOID_CREEP_SPEED_DEN;
+                    if (spd < 20) spd = 20;
+                }
+                motor_set_left (spd - td);
+                motor_set_right(spd + td);
+            }
+            break;
+        }
+
+        case ST_TRAP_BACK:
+            /* Krok 8: cofanie przed ponownym skanem. Linia toru priorytetowo;
+             * dodatkowo pilnujemy, zeby nie wcofac sie w cos z tylu. */
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Pulapka: linia w trakcie cofania (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            {
+                int rear = open_mm(lidar_arc_mm(180, 20));
+                if (rear < TRAP_BACK_MIN_REAR_MM) {
+                    ESP_LOGI(TAG, "Pulapka: z tylu zrobilo sie ciasno (%d mm) - koncze cofanie, ponowny skan.",
+                             rear);
+                    motor_stop();
+                    s_avoid_last_side = 0;
+                    enter(ST_AVOID_SCAN);
+                    break;
+                }
+            }
+            if (now - s_state_t < TRAP_BACK_MS) {
+                motor_set_left(-s_speed_pct);
+                motor_set_right(-s_speed_pct);
+            } else {
+                motor_stop();
+                s_avoid_last_side = 0;   /* skan z nowej pozycji - wolna reka co do strony */
+                ESP_LOGI(TAG, "Pulapka: cofnieto - ponowny skan szczelin.");
+                enter(ST_AVOID_SCAN);
+            }
+            break;
+
+        case ST_TRAP_TURN: {
+            /* Krok 8: obrot w miejscu ku najszerszemu otwartemu kierunkowi
+             * (cel = s_avoid_heading_deg, policzony w ST_AVOID_SCAN). */
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Pulapka: linia w trakcie obrotu (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            float err = heading_err_of(s_avoid_heading_deg);
+            if (fabsf(err) <= TRAP_TURN_TOL_DEG) {
+                motor_stop();
+                s_trap_escapes++;
+                ESP_LOGI(TAG, "Pulapka: obrot ku wyjsciu zakonczony (kurs %.1f st) - wyjscie %d ms (proba %d/%d).",
+                         s_heading_deg, TRAP_ESCAPE_MS, s_trap_escapes, TRAP_MAX_ESCAPES);
+                enter(ST_TRAP_ESCAPE);
+                break;
+            }
+            if (now - s_state_t >= TRAP_TURN_MAX_MS) {
+                ESP_LOGW(TAG, "Pulapka: obrot ku wyjsciu nie osiagnal kursu w %d ms - STOP.", TRAP_TURN_MAX_MS);
+                motor_stop();
+                s_trap_escapes++;
+                enter(ST_OBSTACLE);
+                break;
+            }
+            int p = AVOID_TURN_PCT;
+            if (err > 0.0f) { motor_set_left(-p); motor_set_right( p); }
+            else            { motor_set_left( p); motor_set_right(-p); }
+            break;
+        }
+
+        case ST_TRAP_ESCAPE: {
+            /* Krok 8: jazda na wyjscie z pulapki, trzymajac zamrozony kurs
+             * "ust". Kontrola korytarza dalej aktywna - napotkana przeszkoda
+             * przelacza w normalne omijanie (ST_AVOID_SCAN). Linia priorytetowo. */
+            if (line_confirmed()) {
+                s_line_hit_side = classify_edge_side(line_sensor_read());
+                ESP_LOGI(TAG, "Pulapka: linia w trakcie wyjscia (strona=%s) - przerywam, test mety.",
+                         edge_side_name(s_line_hit_side));
+                motor_stop();
+                enter(ST_LINE_WAIT);
+                break;
+            }
+            /* Krotkie ustalenie kursu po (mozliwe duzym) obrocie. */
+            if (now - s_state_t < AVOID_SETTLE_MS) {
+                motor_stop();
+                s_avoid_heading_deg = s_heading_deg;
+                break;
+            }
+            {
+                int cmin = corridor_min_mm(s_front_stop_mm);
+                s_corridor_mm = cmin;
+                if (cmin < s_front_stop_mm) {
+                    s_obst_block_count++;
+                } else {
+                    s_obst_block_count = 0;
+                }
+                if (s_obst_block_count >= OBSTACLE_DEBOUNCE_COUNT) {
+                    s_obst_block_count = 0;
+                    motor_stop();
+                    ESP_LOGI(TAG, "Pulapka: przeszkoda na drodze wyjscia (%d mm) - normalne omijanie.", cmin);
+                    enter(ST_AVOID_SCAN);
+                    break;
+                }
+            }
+            if (now - s_state_t >= (uint32_t)(AVOID_SETTLE_MS + TRAP_ESCAPE_MS)) {
+                s_trap_backups   = 0;
+                s_trap_escapes   = 0;
+                s_avoid_rescans  = 0;
+                s_avoid_last_side = 0;
+                s_avoid_recovery_until = now + TRAP_RECOVERY_MS;
+                ESP_LOGI(TAG, "Pulapka: wyjscie zakonczone - lagodny powrot na kurs celu (%.1f st).",
+                         s_heading_target_deg);
+                enter(ST_CRUISE);
+                break;
+            }
+            {
+                float err  = heading_err_of(s_avoid_heading_deg);
+                float turn = KP_HEADING * err + DRIVE_TRIM;
+                if (turn >  (float)TURN_MAX) turn =  (float)TURN_MAX;
+                if (turn < -(float)TURN_MAX) turn = -(float)TURN_MAX;
                 int td = (int)lroundf(turn);
                 motor_set_left (s_speed_pct - td);
                 motor_set_right(s_speed_pct + td);
@@ -1115,6 +1373,8 @@ void autonomy_set_enabled(bool enable) {
 }
 
 bool autonomy_is_enabled(void) { return s_enabled; }
+
+bool autonomy_finish_reached(void) { return s_state == ST_STOP_FINISH; }
 
 const char *autonomy_state_str(void) { return state_name(s_state); }
 

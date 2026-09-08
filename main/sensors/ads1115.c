@@ -4,7 +4,6 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <math.h>
 
 static const char *TAG = "ADS1115";
 
@@ -27,22 +26,6 @@ static const char *TAG = "ADS1115";
 #define ADS1115_CONV_DELAY_MS   10      /* > 1/128 s przy 128 probek/s, z zapasem */
 
 static ads1115_data_t s_last = {0};
-
-/* Próg detekcji mety (odchyłka napięcia od spoczynku), regulowany z
- * dashboardu przez ads1115_set_finish_threshold(). Domyślnie z config.h. */
-static float s_finish_threshold_v = HALL_FINISH_THRESHOLD_V;
-
-/* Napięcie spoczynkowe SS495A (bez magnesu w pobliżu) - punkt odniesienia
- * dla wykrycia mety. Rzeczywiste napięcie spoczynkowe zmienia się między
- * uruchomieniami ESP32 (obserwowane empirycznie: ~2,44-2,49 V), więc stała
- * wartość z config.h (HALL_FINISH_REST_V) to tylko wartość startowa -
- * kalibrowana w praktyce raz na przejazd przez autonomy.c (ST_GYRO_CAL,
- * razem z bias żyra) przez ads1115_set_finish_rest_v(). */
-static float s_finish_rest_v = HALL_FINISH_REST_V;
-
-/* Reakcja na Hall mety w trybie RĘCZNYM (patrz nagłówek). Domyślnie NIE -
- * nie przeszkadza w testach jazdy ręcznej; w autonomii Hall działa zawsze. */
-static bool s_hall_manual_enabled = false;
 
 /* Zapis rejestru 16-bitowego w kolejności big-endian (jak INA219). */
 static esp_err_t ads_write16(uint8_t reg, uint16_t val) {
@@ -93,7 +76,7 @@ esp_err_t ads1115_init(void) {
     }
     s_last.address     = ADS1115_ADDR;
     s_last.initialized = true;
-    ESP_LOGI(TAG, "ADS1115 OK pod adresem 0x%02X (A0=Hall mety, A1..A3=czujniki linii, FSR=+-%.3fV)",
+    ESP_LOGI(TAG, "ADS1115 OK pod adresem 0x%02X (A0=linia przod-P, A1..A3=linia przod-L/tyl-L/tyl-P, FSR=+-%.3fV)",
              ADS1115_ADDR, (double)ADS1115_FSR_V);
     return ESP_OK;
 }
@@ -117,15 +100,11 @@ static esp_err_t ads_measure(uint16_t cfg, float *out_v) {
 esp_err_t ads1115_read(ads1115_data_t *out) {
     if (!s_last.initialized) return ESP_ERR_INVALID_STATE;
 
-    /* A0 - czujnik Halla mety (krytyczny: błąd odczytu przerywa cykl). */
+    /* Wszystkie cztery kanały to analogowe czujniki odbiciowe linii
+     * (best-effort: pojedynczy błąd zostawia poprzednią wartość kanału i nie
+     * przerywa całego odczytu). A0 = przód-prawy (dawniej Hall mety). */
     float v;
-    if (ads_measure(ADS1115_CONFIG_AIN0, &v) != ESP_OK) return ESP_FAIL;
-    s_last.voltage_v = v;
-    s_last.finish_detected =
-        fabsf(s_last.voltage_v - s_finish_rest_v) >= s_finish_threshold_v;
-
-    /* A1..A3 - czujniki odbiciowe linii (best-effort: pojedynczy błąd
-     * zostawia poprzednią wartość, nie przerywa całego odczytu). */
+    if (ads_measure(ADS1115_CONFIG_AIN0, &v) == ESP_OK) s_last.line_fr_v = v;
     if (ads_measure(ADS1115_CONFIG_AIN1, &v) == ESP_OK) s_last.line_fl_v = v;
     if (ads_measure(ADS1115_CONFIG_AIN2, &v) == ESP_OK) s_last.line_bl_v = v;
     if (ads_measure(ADS1115_CONFIG_AIN3, &v) == ESP_OK) s_last.line_br_v = v;
@@ -135,37 +114,3 @@ esp_err_t ads1115_read(ads1115_data_t *out) {
 }
 
 ads1115_data_t ads1115_get_last(void) { return s_last; }
-
-void ads1115_set_finish_threshold(float volts) {
-    /* Sensowny zakres: od 1 mV (praktycznie zawsze wykrywa) do pełnej skali
-     * kanału. Wartości spoza zakresu przycinamy zamiast odrzucać. */
-    if (volts < 0.001f)        volts = 0.001f;
-    if (volts > ADS1115_FSR_V) volts = ADS1115_FSR_V;
-    s_finish_threshold_v = volts;
-    ESP_LOGI(TAG, "Prog detekcji mety (Hall) ustawiony na +-%.3f V wzgledem %.3f V",
-             (double)volts, (double)s_finish_rest_v);
-}
-
-float ads1115_get_finish_threshold(void) { return s_finish_threshold_v; }
-
-void ads1115_set_finish_rest_v(float volts) {
-    /* Przycinamy do sensownego zakresu wokol wartosci domyslnej z config.h -
-     * ochrona przed razacym bledem kalibracji (np. gdyby przypadkiem
-     * kalibrowano z magnesem w poblizu). */
-    float lo = HALL_FINISH_REST_V - 0.5f;
-    float hi = HALL_FINISH_REST_V + 0.5f;
-    if (volts < lo) volts = lo;
-    if (volts > hi) volts = hi;
-    s_finish_rest_v = volts;
-    ESP_LOGI(TAG, "Napiecie spoczynkowe Halla (mety) ustawione na %.3f V (bylo domyslnie %.3f V)",
-             (double)volts, (double)HALL_FINISH_REST_V);
-}
-
-float ads1115_get_finish_rest_v(void) { return s_finish_rest_v; }
-
-void ads1115_set_hall_manual_enabled(bool enabled) {
-    s_hall_manual_enabled = enabled;
-    ESP_LOGI(TAG, "Reakcja na Hall mety w trybie recznym: %s", enabled ? "wlaczona" : "wylaczona");
-}
-
-bool ads1115_get_hall_manual_enabled(void) { return s_hall_manual_enabled; }
