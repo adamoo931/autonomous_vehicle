@@ -157,6 +157,7 @@ typedef struct {
     int16_t  line_br_mv;    /* tył-prawy [mV] */
     int8_t   hall_do;       /* surowy stan pinu DO cyfrowego Halla mety (0/1) */
     uint8_t  hall_hit;      /* meta wg polaryzacji DO (hall_finish_detected) w chwili próbki (0/1) */
+    uint8_t  hall_latch;    /* Krok 9c: zatrzask - impuls DO zlapany w ostatnich HALL_LATCH_MS (0/1) */
     int16_t  obj_temp_x10;  /* pirometr: temperatura obiektu [°C] * 10 */
     int16_t  amb_temp_x10;  /* pirometr: temperatura otoczenia [°C] * 10 */
 } autonomy_log_rec_t;

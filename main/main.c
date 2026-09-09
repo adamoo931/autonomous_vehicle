@@ -63,8 +63,9 @@ static void sensor_task(void *arg) {
         /* Odświeża cache ADS1115 (4 analogowe czujniki linii A0..A3), z
          * którego korzysta line_sensor_read(). Wynik nie jest tu potrzebny. */
         ads1115_read(NULL);
-        /* SHT40 (temperatura/wilgotność) zmienia się wolno - odczyt co ~1 s. */
-        if (++slow >= 10) {
+        /* SHT40 (temperatura/wilgotność) zmienia się wolno - odczyt co ~1 s
+         * (25 x 40 ms; patrz vTaskDelay na końcu pętli). */
+        if (++slow >= 25) {
             slow = 0;
             sht40_read(NULL);
         }
@@ -144,7 +145,12 @@ static void sensor_task(void *arg) {
             was_line = false;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        /* 40 ms (~25 Hz): cache czujnikow linii (ads1115_read wyzej) musi
+         * odswiezac sie w tempie zblizonym do petli sterowania (20 Hz),
+         * inaczej autonomia widzi tasme z opoznieniem ~1 okresu i pojazd
+         * wyjezdza za nia zanim STOP zdazy zadzialac. Po podbiciu ADS na
+         * 860 SPS caly przebieg petli to ~15-20 ms + 40 ms = ~60 ms. */
+        vTaskDelay(pdMS_TO_TICKS(40));
     }
 }
 

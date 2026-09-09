@@ -13,17 +13,23 @@ static const char *TAG = "ADS1115";
 
 /* Konfiguracja: single-shot start (OS=1), pojedynczy kanał względem GND
  * (MUX w bitach [14:12]), wzmocnienie PGA=+-4,096V (FSR poniżej), tryb
- * single-shot (MODE=1), 128 próbek/s (DR=100), komparator wyłączony
+ * single-shot (MODE=1), 860 próbek/s (DR=111), komparator wyłączony
  * (COMP_QUE=11). Kolejne kanały różnią się tylko polem MUX:
- *   A0 -> 0xC383, A1 -> 0xD383, A2 -> 0xE383, A3 -> 0xF383.
+ *   A0 -> 0xC3E3, A1 -> 0xD3E3, A2 -> 0xE3E3, A3 -> 0xF3E3.
+ * DR podbite ze 128 na 860 SPS (bity [7:5] 100->111): czas konwersji
+ * ~1,2 ms zamiast ~7,8 ms, dzieki czemu odczyt 4 kanalow spada z ~48 ms
+ * do ~16 ms i cache czujnikow linii odswieza sie znacznie szybciej
+ * (pojazd inaczej wyjezdzal za tasme, zanim STOP zdazyl zadzialac).
+ * Wieksze szumy przy 860 SPS (kilka LSB ~ <1 mV przy FSR +-4,096V) nie
+ * maja znaczenia przy marginesach progow tasma/plytka rzedu setek mV.
  * Zmień PGA (patrz datasheet ADS1115), jeśli któreś napięcie przy realnym
  * zasilaniu czujnika wychodzi poza zakres +-4,096V. */
-#define ADS1115_CONFIG_AIN0     0xC383
-#define ADS1115_CONFIG_AIN1     0xD383
-#define ADS1115_CONFIG_AIN2     0xE383
-#define ADS1115_CONFIG_AIN3     0xF383
+#define ADS1115_CONFIG_AIN0     0xC3E3
+#define ADS1115_CONFIG_AIN1     0xD3E3
+#define ADS1115_CONFIG_AIN2     0xE3E3
+#define ADS1115_CONFIG_AIN3     0xF3E3
 #define ADS1115_FSR_V           4.096f
-#define ADS1115_CONV_DELAY_MS   10      /* > 1/128 s przy 128 probek/s, z zapasem */
+#define ADS1115_CONV_DELAY_MS   2       /* > 1/860 s przy 860 probek/s, z zapasem */
 
 static ads1115_data_t s_last = {0};
 

@@ -97,10 +97,17 @@ typedef enum { EDGE_SIDE_UNKNOWN, EDGE_SIDE_LEFT, EDGE_SIDE_RIGHT } edge_side_t;
  * linii (cala magistrala ADS1115 dzieli te sama podatnosc na zaklocenia
  * silnikow co zyroskop) potrafil na jeden takt (50 ms) uzbroic okno kontaktu
  * z Hallem bez realnego najechania na tasme - niewidoczne w logu CSV (probki
- * co 300 ms), ale spojne z obserwowanym "fake" zdarzeniem. 3 takty = ~150 ms,
- * znikome wzgledem realnego kontaktu trwajacego sekundy. */
-#define LINE_DEBOUNCE_COUNT     3
-#define HALL_DEBOUNCE_COUNT     3
+ * co 300 ms), ale spojne z obserwowanym "fake" zdarzeniem.
+ * Krok 8f: 3 -> 2 takty (~100 ms) - pojazd wyjezdzal za tasme, zanim STOP
+ * zdazyl; dodatkowo naped jest CIETY juz na pierwszej surowej probce (patrz
+ * ST_CRUISE / ST_AVOID_PASS), wiec 2 takty na potwierdzenie stanu wystarcza. */
+#define LINE_DEBOUNCE_COUNT     2
+#define HALL_DEBOUNCE_COUNT     2   /* Krok 9c: 3 -> 2. Cyfrowy DO Halla (49E+LM393)
+                                     * jest czysty; 2 takty (~100 ms) odrzucaja
+                                     * pojedynczy glitch GPIO, a realny przejazd nad
+                                     * magnesem to 2-4 takty aktywnego DO. W oknie
+                                     * kontaktu z tasma dodatkowo dziala zatrzask
+                                     * hall_finish_poll() (krotki impuls w ruchu). */
 
 /* Okresy petli sterowania i logowania. */
 #define LOOP_MS          50      /* 20 Hz - petla sterowania */
@@ -388,10 +395,13 @@ static int      s_trap_escapes = 0;
 #define TRAVERSE_MS_MAX     180000
 #define TOP_EDGE_HEADING_TOL   15.0f
 
-/* Krok 9b: okno zatrzasku impulsu DO cyfrowego Halla - patrz hall_finish_poll().
- * Musi pokryc: impuls w ruchu (czasem par set cm przed tasma) -> debounce
- * linii -> LINE_WAIT_MS -> wejscie w TOP_EDGE. 4 s z zapasem. */
-#define HALL_LATCH_MS         4000
+/* Krok 9b/9c: okno zatrzasku impulsu DO cyfrowego Halla - patrz hall_finish_poll().
+ * Musi pokryc: impuls w ruchu (magnes miniety par set cm przed zatrzymaniem)
+ * -> debounce linii / dojechanie do progu czasu -> wejscie w okno sprawdzania
+ * Halla. 8 s: obejmuje takze przypadek, gdy pojazd dotrze do mety wyraznie
+ * wczesniej niz s_traverse_ms (krotsza trasa) - impuls poczeka na otwarcie
+ * okna. Cyfrowy DO jest czysty, wiec dluzszy zatrzask nie grozi falszywka. */
+#define HALL_LATCH_MS         8000
 
 static volatile uint32_t s_traverse_ms = TRAVERSE_MS_DEF;
 static uint32_t          s_forward_ms  = 0;   /* skumulowany czas ruchu do przodu w przejezdzie */
@@ -540,6 +550,10 @@ typedef struct {
     line_sensor_data_t line;
     int8_t             hall_do;    /* surowy stan pinu DO cyfrowego Halla mety (0/1) */
     bool               hall_hit;   /* meta wg polaryzacji DO (hall_finish_detected) */
+    bool               hall_latch; /* Krok 9c: czy zatrzask hall_finish_poll() zlapal
+                                    * impuls DO w ostatnich HALL_LATCH_MS (impuls
+                                    * krotszy niz odstep probek CSV bylby inaczej
+                                    * niewidoczny). */
     int16_t            sec_mm[SEC_COUNT];
     int16_t            corridor_mm; /* Krok 6: min. korytarza na wprost [mm] */
     float              heading_deg;
@@ -550,8 +564,9 @@ static telem_t telem_snapshot(void) {
     telem_t t;
     t.imu     = imu_get_last();
     t.line    = line_sensor_read();
-    t.hall_do  = (int8_t)hall_finish_do_raw();
-    t.hall_hit = hall_finish_detected();
+    t.hall_do    = (int8_t)hall_finish_do_raw();
+    t.hall_hit   = hall_finish_detected();
+    t.hall_latch = hall_finish_seen_recently(now_ms(), HALL_LATCH_MS);
     for (int i = 0; i < SEC_COUNT; i++)
         t.sec_mm[i] = (int16_t)lidar_arc_mm(s_sec_center[i], s_sec_half[i]);
     t.corridor_mm = (int16_t)corridor_min_mm(s_front_stop_mm);
@@ -589,6 +604,7 @@ static void record_sample(uint32_t now, pyrometer_data_t pd, const telem_t *tl) 
     r->line_br_mv   = (int16_t)(tl->line.back_right_v  * 1000.0f);
     r->hall_do      = tl->hall_do;
     r->hall_hit     = tl->hall_hit ? 1 : 0;
+    r->hall_latch   = tl->hall_latch ? 1 : 0;
     r->obj_temp_x10 = (int16_t)(pd.object_temp  * 10.0f);
     r->amb_temp_x10 = (int16_t)(pd.ambient_temp * 10.0f);
 }
@@ -875,7 +891,7 @@ static void autonomy_task(void *arg) {
             ESP_LOGI(TAG,
                 "[%s] L=%d%% R=%d%% | kurs=%.1f cel=%.1f err=%.1f | gyroZ raw/filt=%.1f/%.1f bias=%.2f /s | "
                 "korytarz=%d/prog=%d mm omij_cel=%.1f | LIDAR P/PL/L/TL/T/TP/R/PP=%d/%d/%d/%d/%d/%d/%d/%d mm | "
-                "linia PP/PL/TL/TP=%d/%d/%d/%d mV | hallDO=%d wykryto=%d",
+                "linia PP/PL/TL/TP=%d/%d/%d/%d mV | hallDO=%d wykryto=%d zatrzask=%d",
                 state_name(s_state), motor_get_left_speed(), motor_get_right_speed(),
                 tl.heading_deg, s_heading_target_deg, heading_err(),
                 tl.imu.gyro_z, tl.gyro_z_filt, s_gyro_bias,
@@ -885,24 +901,38 @@ static void autonomy_task(void *arg) {
                 tl.sec_mm[SEC_RIGHT], tl.sec_mm[SEC_FRONT_R],
                 (int)(tl.line.front_right_v * 1000.0f), (int)(tl.line.front_left_v * 1000.0f),
                 (int)(tl.line.back_left_v * 1000.0f), (int)(tl.line.back_right_v * 1000.0f),
-                (int)tl.hall_do, (int)tl.hall_hit);
+                (int)tl.hall_do, (int)tl.hall_hit, (int)tl.hall_latch);
             record_sample(now, pd, &tl);
         }
 
-        /* Krok 5c: Hall (teraz cyfrowy, hall_finish_detected()) sprawdzany
-         * TYLKO w oknie tuz po kontakcie z tasma (ST_LINE_WAIT/ST_LINE_BACKUP/
-         * ST_LINE_PAUSE), NIE w trakcie zwyklej jazdy. Magnes lezy pod ta sama
-         * tasma co granica toru - bez kontaktu z tasma Hall nie widzi
-         * prawdziwej mety, wiec zadzialanie poza tym oknem to niemal na pewno
-         * zaklocenie (test_13: przy manewrach o duzym poborze pradu odczyt
-         * potrafil "plywac"). Bramkowanie oknem kontaktu + debounce odcina te
-         * falszywe trafienia. */
-        bool hall_window = (s_state == ST_LINE_WAIT || s_state == ST_LINE_BACKUP ||
+        /* Krok 5c/9c: kiedy Hall mety liczy sie jako META. Dwa niezalezne tory:
+         *
+         *  (a) OKNO KONTAKTU Z TASMA (ST_LINE_WAIT/BACKUP/PAUSE/TOP_EDGE):
+         *      DO aktywne teraz LUB zatrzasniety impuls z ostatnich
+         *      HALL_LATCH_MS (magnes miniety w ruchu tuz przed zatrzymaniem -
+         *      Krok 9b). Okno jest krotkie, wiec zatrzask nie zdazy zbudowac
+         *      falszywki.
+         *
+         *  (b) STREFA METY (skumulowana jazda naprzod >= s_traverse_ms), w
+         *      dowolnym stanie: TYLKO DO aktywne TERAZ, przez
+         *      HALL_DEBOUNCE_COUNT kolejnych taktow. Powod (b): pojazd potrafi
+         *      przejechac CENTRALNIE przez mete nie zahaczajac zadnym
+         *      czujnikiem odbiciowym o tasme - impuls DO widoczny w logu, ale
+         *      zaden stan z (a) sie nie wlaczal i meta byla gubiona (robot nie
+         *      stawal, buzzer nie gral). W tak szerokim oknie NIE uzywamy
+         *      zatrzasku - pojedynczy glitch + zatrzask = pewny falszywy
+         *      finisz; realny przejazd nad magnesem to i tak 2-4 takty DO.
+         *
+         * Dawny analogowy Hall na wspolnej magistrali ADS "plywal" o setki mV
+         * przy duzym poborze pradu (test_13); cyfrowy DO (49E+LM393+prog na
+         * potencjometrze) jest czysty, stad mozna (b) w ogole dopuscic. */
+        bool near_finish = (s_forward_ms >= s_traverse_ms);
+        bool line_state  = (s_state == ST_LINE_WAIT  || s_state == ST_LINE_BACKUP ||
                             s_state == ST_LINE_PAUSE || s_state == ST_TOP_EDGE);
-        /* Krok 9b: liczy sie DO aktywne TERAZ albo krotki impuls z ostatnich
-         * HALL_LATCH_MS (magnes miniety w ruchu tuz przed zatrzymaniem). */
-        if (hall_window && (hall_finish_detected() ||
-                            hall_finish_seen_recently(now, HALL_LATCH_MS))) {
+        bool hall_sig = (line_state && (hall_finish_detected() ||
+                                        hall_finish_seen_recently(now, HALL_LATCH_MS)))
+                     || (near_finish && hall_finish_detected());
+        if (hall_sig) {
             /* Krok 5d: debounce - patrz HALL_DEBOUNCE_COUNT. */
             s_hall_debounce++;
         } else {
@@ -910,7 +940,9 @@ static void autonomy_task(void *arg) {
         }
         if (s_hall_debounce >= HALL_DEBOUNCE_COUNT) {
             s_hall_debounce = 0;
-            finish_run(ST_STOP_FINISH, "Meta potwierdzona czujnikiem Halla (okno kontaktu z tasma)");
+            finish_run(ST_STOP_FINISH, near_finish && !line_state
+                       ? "Meta potwierdzona czujnikiem Halla (strefa mety)"
+                       : "Meta potwierdzona czujnikiem Halla (okno kontaktu z tasma)");
             vTaskDelay(pdMS_TO_TICKS(LOOP_MS));
             continue;
         }
@@ -961,23 +993,30 @@ static void autonomy_task(void *arg) {
              * linii sa w tym oknie ignorowane. */
             {
                 bool past_start_window = (now - s_run_cruise_start_ms >= START_LINE_IGNORE_MS);
-                /* Krok 5d: debounce - patrz LINE_DEBOUNCE_COUNT. */
+                /* Krok 5d/8f: debounce - patrz LINE_DEBOUNCE_COUNT. */
                 if (past_start_window && track_line_detected()) {
                     s_line_debounce++;
+                    if (s_line_debounce >= LINE_DEBOUNCE_COUNT) {
+                        s_line_debounce = 0;
+                        /* Krok 5b: zapamietaj, ktory czujnik zareagowal - uzyte przy
+                         * powrocie do jazdy (ST_LINE_PAUSE), zeby skrecic OD trafionej
+                         * krawedzi zamiast slepo wracac na ten sam kurs. */
+                        note_line_hit();
+                        ESP_LOGI(TAG, "Linia wykryta (strona=%s, kat natarcia %.1f st) - stop, czekam %d ms na potwierdzenie mety (Hall).",
+                                 edge_side_name(s_line_hit_side), s_edge_hit_err, LINE_WAIT_MS);
+                        motor_stop();
+                        enter(ST_LINE_WAIT);
+                        break;
+                    }
+                    /* Krok 8f: jeszcze nie potwierdzone (debounce w toku), ale
+                     * naped juz TNIEMY - inaczej pojazd przejezdza tasme w
+                     * czasie (N-1) taktow debounce'u. Jesli to byl pojedynczy
+                     * glitch ADC, w nastepnym takcie s_line_debounce=0 i
+                     * regulator kursu ponizej wznowi jazde. */
+                    motor_stop();
+                    break;
                 } else {
                     s_line_debounce = 0;
-                }
-                if (s_line_debounce >= LINE_DEBOUNCE_COUNT) {
-                    s_line_debounce = 0;
-                    /* Krok 5b: zapamietaj, ktory czujnik zareagowal - uzyte przy
-                     * powrocie do jazdy (ST_LINE_PAUSE), zeby skrecic OD trafionej
-                     * krawedzi zamiast slepo wracac na ten sam kurs. */
-                    note_line_hit();
-                    ESP_LOGI(TAG, "Linia wykryta (strona=%s, kat natarcia %.1f st) - stop, czekam %d ms na potwierdzenie mety (Hall).",
-                             edge_side_name(s_line_hit_side), s_edge_hit_err, LINE_WAIT_MS);
-                    motor_stop();
-                    enter(ST_LINE_WAIT);
-                    break;
                 }
             }
 
@@ -1248,6 +1287,10 @@ static void autonomy_task(void *arg) {
                 enter(ST_LINE_WAIT);
                 break;
             }
+            /* Krok 8f: debounce linii w toku (line_confirmed() jeszcze false) -
+             * juz TNIEMY naped, zeby nie przejechac tasmy. Glitch ADC =
+             * s_line_debounce wyzeruje sie w line_confirmed() i jazda wroci. */
+            if (track_line_detected()) { motor_stop(); break; }
             {
                 int cmin = corridor_min_mm(s_front_stop_mm);
                 s_corridor_mm = cmin;

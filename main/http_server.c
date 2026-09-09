@@ -953,7 +953,7 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         "gyro_x_dps,gyro_y_dps,gyro_z_dps,gyro_z_filt_dps,gyro_bias_dps,kurs_deg,"
         "lidar_przod_mm,lidar_przodL_mm,lidar_lewo_mm,lidar_tylL_mm,"
         "lidar_tyl_mm,lidar_tylP_mm,lidar_prawo_mm,lidar_przodP_mm,korytarz_mm,"
-        "linia_PP_mV,linia_PL_mV,linia_TL_mV,linia_TP_mV,hall_do,hall_wykryto,"
+        "linia_PP_mV,linia_PL_mV,linia_TL_mV,linia_TP_mV,hall_do,hall_wykryto,hall_zatrzask,"
         "temp_obiekt_C,temp_otoczenie_C,delta_C\r\n";
     httpd_resp_send_chunk(req, header, strlen(header));
 
@@ -965,14 +965,14 @@ static esp_err_t handle_autonomy_log_csv(httpd_req_t *req) {
         float obj = r.obj_temp_x10 / 10.0f;
         float amb = r.amb_temp_x10 / 10.0f;
         int len = snprintf(buf, sizeof(buf),
-            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
+            "%lu,%s,%d,%d,%.1f,%.1f,%.1f,%.1f,%.2f,%.1f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.1f,%.1f,%.1f\r\n",
             (unsigned long)r.t_ms, autonomy_log_state_name(r.state),
             r.motor_l, r.motor_r,
             r.gyro_x_x10 / 10.0f, r.gyro_y_x10 / 10.0f, r.gyro_z_x10 / 10.0f,
             r.gyro_zf_x10 / 10.0f, r.gyro_bias_x10 / 10.0f, r.heading_x10 / 10.0f,
             r.lidar_mm[0], r.lidar_mm[1], r.lidar_mm[2], r.lidar_mm[3],
             r.lidar_mm[4], r.lidar_mm[5], r.lidar_mm[6], r.lidar_mm[7], r.corridor_mm,
-            r.line_fr_mv, r.line_fl_mv, r.line_bl_mv, r.line_br_mv, r.hall_do, r.hall_hit,
+            r.line_fr_mv, r.line_fl_mv, r.line_bl_mv, r.line_br_mv, r.hall_do, r.hall_hit, r.hall_latch,
             obj, amb, obj - amb);
         httpd_resp_send_chunk(req, buf, len);
     }
